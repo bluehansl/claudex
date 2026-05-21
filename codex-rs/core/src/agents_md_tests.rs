@@ -351,6 +351,46 @@ async fn project_root_markers_are_honored_for_agents_discovery() {
 }
 
 #[tokio::test]
+async fn home_ancestors_are_loaded_before_nested_project_docs() {
+    let home = dirs::home_dir().expect("home dir should be available for test");
+    let root = tempfile::Builder::new()
+        .prefix("codex-home-agents-test")
+        .tempdir_in(home)
+        .expect("tempdir in home");
+    fs::write(root.path().join("AGENTS.md"), "home scoped doc").unwrap();
+
+    let org = root.path().join("git");
+    let project = org.join("fsswms");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    fs::write(org.join("AGENTS.md"), "org doc").unwrap();
+    fs::write(project.join("AGENTS.md"), "project doc").unwrap();
+
+    let mut cfg = make_config(&root, /*limit*/ 4096, /*instructions*/ None).await;
+    cfg.cwd = project.abs();
+
+    let discovery = agents_md_paths(&cfg).await.expect("discover paths");
+    let expected_tail = vec![
+        AbsolutePathBuf::try_from(
+            dunce::canonicalize(root.path().join("AGENTS.md")).expect("canonical home scoped doc"),
+        )
+        .expect("absolute home scoped doc path"),
+        AbsolutePathBuf::try_from(
+            dunce::canonicalize(org.join("AGENTS.md")).expect("canonical org doc"),
+        )
+        .expect("absolute org doc path"),
+        AbsolutePathBuf::try_from(
+            dunce::canonicalize(project.join("AGENTS.md")).expect("canonical project doc"),
+        )
+        .expect("absolute project doc path"),
+    ];
+
+    assert!(
+        discovery.ends_with(&expected_tail),
+        "expected home-to-cwd docs at the end of discovery list: {discovery:?}"
+    );
+}
+
+#[tokio::test]
 async fn instruction_sources_include_global_before_agents_md_docs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::write(tmp.path().join("AGENTS.md"), "project doc").unwrap();
