@@ -1,0 +1,283 @@
+name: claudex-platform-packages
+
+on:
+  repository_dispatch:
+    types:
+      - claudex-platform-packages
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/claudex-platform-packages.yml"
+      - ".github/actions/setup-rusty-v8/**"
+      - ".github/scripts/install-musl-build-tools.sh"
+      - "codex-cli/**"
+      - "codex-rs/**"
+      - "scripts/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "npm release version"
+        required: true
+        default: "0.1.0"
+      packages:
+        description: "Package filter: all, win32, win32-x64, win32-arm64, darwin-arm64, linux-x64, linux-arm64"
+        required: false
+        default: "all"
+
+jobs:
+  package:
+    name: ${{ matrix.package }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: claudex-linux-x64
+            npm_tag: linux-x64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - package: claudex-linux-arm64
+            npm_tag: linux-arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - package: claudex-darwin-arm64
+            npm_tag: darwin-arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - package: claudex-win32-x64
+            npm_tag: win32-x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2022
+          - package: claudex-win32-arm64
+            npm_tag: win32-arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+    steps:
+      - name: Check package filter
+        shell: bash
+        env:
+          PACKAGE_FILTER: ${{ inputs.packages || 'all' }}
+          MATRIX_PACKAGE: ${{ matrix.package }}
+          MATRIX_NPM_TAG: ${{ matrix.npm_tag }}
+        run: |
+          set -euo pipefail
+          should_build=false
+          case "${PACKAGE_FILTER}" in
+            ""|"all"|${MATRIX_PACKAGE}|${MATRIX_NPM_TAG})
+              should_build=true
+              ;;
+            "win32")
+              [[ "${MATRIX_NPM_TAG}" == win32-* ]] && should_build=true
+              ;;
+            "linux")
+              [[ "${MATRIX_NPM_TAG}" == linux-* ]] && should_build=true
+              ;;
+            "darwin")
+              [[ "${MATRIX_NPM_TAG}" == darwin-* ]] && should_build=true
+              ;;
+          esac
+          echo "SHOULD_BUILD=${should_build}" >> "$GITHUB_ENV"
+          echo "Package filter ${PACKAGE_FILTER}; ${MATRIX_PACKAGE} build=${should_build}"
+
+      - uses: actions/checkout@v5
+        if: env.SHOULD_BUILD == 'true'
+
+      - uses: actions/setup-python@v6
+        if: env.SHOULD_BUILD == 'true'
+        with:
+          python-version: "3.x"
+
+      - uses: actions/setup-node@v6
+        if: env.SHOULD_BUILD == 'true'
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.SHOULD_BUILD == 'true'
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure Rust target is installed
+        if: env.SHOULD_BUILD == 'true'
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "${TARGET}"
+
+      - name: Install Linux build dependencies
+        if: env.SHOULD_BUILD == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libubsan1
+
+      - name: Use hermetic Cargo home for musl
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig for musl
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Configure rustc UBSan wrapper for musl
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags for musl
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+      - name: Configure musl rusty_v8 artifacts
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'unknown-linux-musl')
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build Linux bwrap and export digest
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'linux')
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --target "${TARGET}" --release --bin bwrap
+          bwrap_path="target/${TARGET}/release/bwrap"
+          digest="$(sha256sum "${bwrap_path}" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
+          echo "Built bwrap ${bwrap_path} with sha256:${digest}"
+
+      - name: Build release binaries
+        if: env.SHOULD_BUILD == 'true'
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          build_args=(--bin claudex)
+          if [[ "${TARGET}" == *windows* ]]; then
+            build_args+=(--bin codex-command-runner --bin codex-windows-sandbox-setup)
+          fi
+          cargo build --target "${TARGET}" --release "${build_args[@]}"
+
+      - name: Stage npm platform tarball
+        if: env.SHOULD_BUILD == 'true'
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          NPM_TAG: ${{ matrix.npm_tag }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.event.client_payload.version || inputs.version || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${VERSION}" ]]; then
+            VERSION="$(python - <<'PY'
+          import tomllib
+
+          with open("codex-rs/Cargo.toml", "rb") as fh:
+              print(tomllib.load(fh)["workspace"]["package"]["version"])
+          PY
+            )"
+          fi
+          vendor_root="${GITHUB_WORKSPACE}/.claudex-vendor"
+          package_dir="${vendor_root}/vendor/${TARGET}"
+          stage_dir="${GITHUB_WORKSPACE}/.claudex-stage-${PACKAGE}"
+          output_dir="${GITHUB_WORKSPACE}/dist/npm"
+          mkdir -p "${output_dir}"
+          package_args=(
+            --target "${TARGET}"
+            --variant claudex
+            --entrypoint-bin "codex-rs/target/${TARGET}/release/claudex"
+            --package-dir "${package_dir}"
+            --force
+          )
+          if [[ "${TARGET}" == *windows* ]]; then
+            package_args=(
+              --target "${TARGET}"
+              --variant claudex
+              --entrypoint-bin "codex-rs/target/${TARGET}/release/claudex.exe"
+              --codex-command-runner-bin "codex-rs/target/${TARGET}/release/codex-command-runner.exe"
+              --codex-windows-sandbox-setup-bin "codex-rs/target/${TARGET}/release/codex-windows-sandbox-setup.exe"
+              --package-dir "${package_dir}"
+              --force
+            )
+          elif [[ "${TARGET}" == *linux* ]]; then
+            package_args+=(
+              --bwrap-bin "codex-rs/target/${TARGET}/release/bwrap"
+            )
+          fi
+
+          python scripts/build_codex_package.py "${package_args[@]}"
+          python codex-cli/scripts/build_npm_package.py \
+            --package "${PACKAGE}" \
+            --release-version "${VERSION}" \
+            --vendor-src "${vendor_root}/vendor" \
+            --staging-dir "${stage_dir}" \
+            --pack-output "${output_dir}/claudex-npm-${NPM_TAG}-${VERSION}.tgz"
+
+      - name: Upload npm tarball
+        if: env.SHOULD_BUILD == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}
+          path: dist/npm/claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}.tgz
+          if-no-files-found: error

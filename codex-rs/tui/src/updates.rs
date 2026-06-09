@@ -5,7 +5,6 @@ use crate::npm_registry;
 use crate::npm_registry::NpmPackageInfo;
 use crate::update_action;
 use crate::update_action::UpdateAction;
-use crate::update_versions::extract_version_from_latest_tag;
 use crate::update_versions::is_newer;
 use crate::update_versions::is_source_build_version;
 use chrono::DateTime;
@@ -61,19 +60,6 @@ struct VersionInfo {
 }
 
 const VERSION_FILENAME: &str = "version.json";
-// We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
-
-#[derive(Deserialize, Debug, Clone)]
-struct ReleaseInfo {
-    tag_name: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct HomebrewCaskInfo {
-    version: String,
-}
 
 fn version_filepath(config: &Config) -> PathBuf {
     config.codex_home.join(VERSION_FILENAME).into_path_buf()
@@ -85,33 +71,21 @@ fn read_version_info(version_file: &Path) -> anyhow::Result<VersionInfo> {
 }
 
 async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> anyhow::Result<()> {
-    let latest_version = match action {
-        Some(UpdateAction::BrewUpgrade) => {
-            let HomebrewCaskInfo { version } = create_client()
-                .get(HOMEBREW_CASK_API_URL)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<HomebrewCaskInfo>()
-                .await?;
-            version
-        }
-        Some(UpdateAction::NpmGlobalLatest) | Some(UpdateAction::BunGlobalLatest) => {
-            let latest_version = fetch_latest_github_release_version().await?;
-            let package_info = create_client()
-                .get(npm_registry::PACKAGE_URL)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<NpmPackageInfo>()
-                .await?;
-            npm_registry::ensure_version_ready(&package_info, &latest_version)?;
-            latest_version
-        }
-        Some(UpdateAction::StandaloneUnix) | Some(UpdateAction::StandaloneWindows) | None => {
-            fetch_latest_github_release_version().await?
-        }
-    };
+    let package_info = create_client()
+        .get(npm_registry::PACKAGE_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<NpmPackageInfo>()
+        .await?;
+    let latest_version = npm_registry::latest_version(&package_info)?
+        .ok_or_else(|| anyhow::anyhow!("npm package is missing latest dist-tag"))?;
+    if matches!(
+        action,
+        Some(UpdateAction::NpmGlobalLatest) | Some(UpdateAction::BunGlobalLatest)
+    ) {
+        npm_registry::ensure_version_ready(&package_info, &latest_version)?;
+    }
 
     // Preserve any previously dismissed version if present.
     let prev_info = read_version_info(version_file).ok();
@@ -127,19 +101,6 @@ async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> 
     }
     tokio::fs::write(version_file, json_line).await?;
     Ok(())
-}
-
-async fn fetch_latest_github_release_version() -> anyhow::Result<String> {
-    let ReleaseInfo {
-        tag_name: latest_tag_name,
-    } = create_client()
-        .get(LATEST_RELEASE_URL)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<ReleaseInfo>()
-        .await?;
-    extract_version_from_latest_tag(&latest_tag_name)
 }
 
 /// Returns the latest version to show in a popup, if it should be shown.

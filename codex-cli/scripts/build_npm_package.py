@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage and optionally package the @openai/codex npm module."""
+"""Stage and optionally package the @bluehansl/claudex npm module."""
 
 import argparse
 import json
@@ -15,49 +15,42 @@ CODEX_CLI_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = CODEX_CLI_ROOT.parent
 RESPONSES_API_PROXY_NPM_ROOT = REPO_ROOT / "codex-rs" / "responses-api-proxy" / "npm"
 CODEX_SDK_ROOT = REPO_ROOT / "sdk" / "typescript"
-CODEX_NPM_NAME = "@openai/codex"
+CODEX_NPM_NAME = "@bluehansl/claudex"
 CODEX_PACKAGE_COMPONENT = "codex-package"
 
-# `npm_name` is the local optional-dependency alias consumed by `bin/codex.js`.
-# The underlying package published to npm is always `@openai/codex`.
+# `npm_name` is the local optional-dependency alias consumed by `bin/claudex.js`.
+# The underlying package published to npm is always `@bluehansl/claudex`.
 CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
-    "codex-linux-x64": {
-        "npm_name": "@openai/codex-linux-x64",
+    "claudex-linux-x64": {
+        "npm_name": "@bluehansl/claudex-linux-x64",
         "npm_tag": "linux-x64",
         "target_triple": "x86_64-unknown-linux-musl",
         "os": "linux",
         "cpu": "x64",
     },
-    "codex-linux-arm64": {
-        "npm_name": "@openai/codex-linux-arm64",
+    "claudex-linux-arm64": {
+        "npm_name": "@bluehansl/claudex-linux-arm64",
         "npm_tag": "linux-arm64",
         "target_triple": "aarch64-unknown-linux-musl",
         "os": "linux",
         "cpu": "arm64",
     },
-    "codex-darwin-x64": {
-        "npm_name": "@openai/codex-darwin-x64",
-        "npm_tag": "darwin-x64",
-        "target_triple": "x86_64-apple-darwin",
-        "os": "darwin",
-        "cpu": "x64",
-    },
-    "codex-darwin-arm64": {
-        "npm_name": "@openai/codex-darwin-arm64",
+    "claudex-darwin-arm64": {
+        "npm_name": "@bluehansl/claudex-darwin-arm64",
         "npm_tag": "darwin-arm64",
         "target_triple": "aarch64-apple-darwin",
         "os": "darwin",
         "cpu": "arm64",
     },
-    "codex-win32-x64": {
-        "npm_name": "@openai/codex-win32-x64",
+    "claudex-win32-x64": {
+        "npm_name": "@bluehansl/claudex-win32-x64",
         "npm_tag": "win32-x64",
         "target_triple": "x86_64-pc-windows-msvc",
         "os": "win32",
         "cpu": "x64",
     },
-    "codex-win32-arm64": {
-        "npm_name": "@openai/codex-win32-arm64",
+    "claudex-win32-arm64": {
+        "npm_name": "@bluehansl/claudex-win32-arm64",
         "npm_tag": "win32-arm64",
         "target_triple": "aarch64-pc-windows-msvc",
         "os": "win32",
@@ -66,17 +59,16 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
 }
 
 PACKAGE_EXPANSIONS: dict[str, list[str]] = {
-    "codex": ["codex", *CODEX_PLATFORM_PACKAGES],
+    "claudex": ["claudex", *CODEX_PLATFORM_PACKAGES],
 }
 
 PACKAGE_NATIVE_COMPONENTS: dict[str, list[str]] = {
-    "codex": [],
-    "codex-linux-x64": [CODEX_PACKAGE_COMPONENT],
-    "codex-linux-arm64": [CODEX_PACKAGE_COMPONENT],
-    "codex-darwin-x64": [CODEX_PACKAGE_COMPONENT],
-    "codex-darwin-arm64": [CODEX_PACKAGE_COMPONENT],
-    "codex-win32-x64": [CODEX_PACKAGE_COMPONENT],
-    "codex-win32-arm64": [CODEX_PACKAGE_COMPONENT],
+    "claudex": [],
+    "claudex-linux-x64": [CODEX_PACKAGE_COMPONENT],
+    "claudex-linux-arm64": [CODEX_PACKAGE_COMPONENT],
+    "claudex-darwin-arm64": [CODEX_PACKAGE_COMPONENT],
+    "claudex-win32-x64": [CODEX_PACKAGE_COMPONENT],
+    "claudex-win32-arm64": [CODEX_PACKAGE_COMPONENT],
     "codex-responses-api-proxy": ["codex-responses-api-proxy"],
     "codex-sdk": [],
 }
@@ -89,12 +81,12 @@ PACKAGE_TARGET_FILTERS: dict[str, str] = {
 PACKAGE_CHOICES = tuple(PACKAGE_NATIVE_COMPONENTS)
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build or stage the Codex CLI npm package.")
+    parser = argparse.ArgumentParser(description="Build or stage the Claudex CLI npm package.")
     parser.add_argument(
         "--package",
         choices=PACKAGE_CHOICES,
-        default="codex",
-        help="Which npm package to stage (default: codex).",
+        default="claudex",
+        help="Which npm package to stage (default: claudex).",
     )
     parser.add_argument(
         "--version",
@@ -174,12 +166,12 @@ def main() -> int:
 
         if release_version:
             staging_dir_str = str(staging_dir)
-            if package == "codex":
+            if package == "claudex":
                 print(
                     f"Staged version {version} for release in {staging_dir_str}\n\n"
                     "Verify the CLI:\n"
-                    f"    node {staging_dir_str}/bin/codex.js --version\n"
-                    f"    node {staging_dir_str}/bin/codex.js --help\n\n"
+                    f"    node {staging_dir_str}/bin/claudex.js --version\n"
+                    f"    node {staging_dir_str}/bin/claudex.js --help\n\n"
                 )
             elif package == "codex-responses-api-proxy":
                 print(
@@ -230,10 +222,13 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
     package_json: dict
     package_json_path: Path | None = None
 
-    if package == "codex":
+    if package == "claudex":
         bin_dir = staging_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(CODEX_CLI_ROOT / "bin" / "codex.js", bin_dir / "codex.js")
+        shutil.copy2(CODEX_CLI_ROOT / "bin" / "claudex.js", bin_dir / "claudex.js")
+        rg_manifest = CODEX_CLI_ROOT / "bin" / "rg"
+        if rg_manifest.exists():
+            shutil.copy2(rg_manifest, bin_dir / "rg")
 
         readme_src = REPO_ROOT / "README.md"
         if readme_src.exists():
@@ -291,15 +286,15 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
             package_json = json.load(fh)
         package_json["version"] = version
 
-    if package == "codex":
-        package_json["files"] = ["bin/codex.js"]
+    if package == "claudex":
+        package_json["files"] = ["bin"]
         package_json["optionalDependencies"] = {
             CODEX_PLATFORM_PACKAGES[platform_package]["npm_name"]: (
                 f"npm:{CODEX_NPM_NAME}@"
                 f"{compute_platform_package_version(version, CODEX_PLATFORM_PACKAGES[platform_package]['npm_tag'])}"
             )
-            for platform_package in PACKAGE_EXPANSIONS["codex"]
-            if platform_package != "codex"
+            for platform_package in PACKAGE_EXPANSIONS["claudex"]
+            if platform_package != "claudex"
         }
 
     elif package == "codex-sdk":
@@ -410,6 +405,9 @@ def copy_native_binaries(
 def run_npm_pack(staging_dir: Path, output_path: Path) -> Path:
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_bin = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm_bin is None:
+        raise RuntimeError("Unable to find npm on PATH.")
 
     with tempfile.TemporaryDirectory(prefix="codex-npm-pack-") as pack_dir_str:
         pack_dir = Path(pack_dir_str)
@@ -421,7 +419,7 @@ def run_npm_pack(staging_dir: Path, output_path: Path) -> Path:
         env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
         env["NPM_CONFIG_LOGS_DIR"] = str(npm_logs_dir)
         stdout = subprocess.check_output(
-            ["npm", "pack", "--json", "--pack-destination", str(pack_dir)],
+            [npm_bin, "pack", "--json", "--pack-destination", str(pack_dir)],
             cwd=staging_dir,
             env=env,
             text=True,

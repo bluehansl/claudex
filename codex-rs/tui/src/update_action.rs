@@ -2,15 +2,15 @@
 use codex_install_context::InstallContext;
 #[cfg(any(not(debug_assertions), test))]
 use codex_install_context::InstallMethod;
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(test)]
 use codex_install_context::StandalonePlatform;
 
 /// Update action the CLI should perform after the TUI exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateAction {
-    /// Update via `npm install -g @openai/codex@latest`.
+    /// Update via `npm install -g @bluehansl/claudex@latest`.
     NpmGlobalLatest,
-    /// Update via `bun install -g @openai/codex@latest`.
+    /// Update via `bun install -g @bluehansl/claudex@latest`.
     BunGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
@@ -26,20 +26,15 @@ impl UpdateAction {
         match &context.method {
             InstallMethod::Npm => Some(UpdateAction::NpmGlobalLatest),
             InstallMethod::Bun => Some(UpdateAction::BunGlobalLatest),
-            InstallMethod::Brew => Some(UpdateAction::BrewUpgrade),
-            InstallMethod::Standalone { platform, .. } => Some(match platform {
-                StandalonePlatform::Unix => UpdateAction::StandaloneUnix,
-                StandalonePlatform::Windows => UpdateAction::StandaloneWindows,
-            }),
-            InstallMethod::Other => None,
+            InstallMethod::Brew | InstallMethod::Standalone { .. } | InstallMethod::Other => None,
         }
     }
 
     /// Returns the list of command-line arguments for invoking the update.
     pub fn command_args(self) -> (&'static str, &'static [&'static str]) {
         match self {
-            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
-            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
+            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@bluehansl/claudex"]),
+            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@bluehansl/claudex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => (
                 "sh",
@@ -108,7 +103,7 @@ mod tests {
                 method: InstallMethod::Brew,
                 package_layout: None,
             }),
-            Some(UpdateAction::BrewUpgrade)
+            None
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
@@ -119,7 +114,7 @@ mod tests {
                 },
                 package_layout: None,
             }),
-            Some(UpdateAction::StandaloneUnix)
+            None
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
@@ -130,7 +125,7 @@ mod tests {
                 },
                 package_layout: None,
             }),
-            Some(UpdateAction::StandaloneWindows)
+            None
         );
     }
 
@@ -154,6 +149,18 @@ mod tests {
                     "irm https://chatgpt.com/codex/install.ps1 | iex"
                 ][..],
             )
+        );
+    }
+
+    #[test]
+    fn npm_update_commands_install_claudex() {
+        assert_eq!(
+            UpdateAction::NpmGlobalLatest.command_args(),
+            ("npm", &["install", "-g", "@bluehansl/claudex"][..],)
+        );
+        assert_eq!(
+            UpdateAction::BunGlobalLatest.command_args(),
+            ("bun", &["install", "-g", "@bluehansl/claudex"][..],)
         );
     }
 }

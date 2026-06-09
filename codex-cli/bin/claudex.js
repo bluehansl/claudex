@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Unified entry point for the Codex CLI.
+// Unified entry point for the Claudex CLI.
 
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "fs";
@@ -13,12 +13,11 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
+  "x86_64-unknown-linux-musl": "@bluehansl/claudex-linux-x64",
+  "aarch64-unknown-linux-musl": "@bluehansl/claudex-linux-arm64",
+  "aarch64-apple-darwin": "@bluehansl/claudex-darwin-arm64",
+  "x86_64-pc-windows-msvc": "@bluehansl/claudex-win32-x64",
+  "aarch64-pc-windows-msvc": "@bluehansl/claudex-win32-arm64",
 };
 
 const { platform, arch } = process;
@@ -40,9 +39,6 @@ switch (platform) {
     break;
   case "darwin":
     switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-apple-darwin";
-        break;
       case "arm64":
         targetTriple = "aarch64-apple-darwin";
         break;
@@ -75,29 +71,36 @@ if (!platformPackage) {
   throw new Error(`Unsupported target triple: ${targetTriple}`);
 }
 
+const claudexBinaryName = process.platform === "win32" ? "claudex.exe" : "claudex";
 const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
 const localVendorRoot = path.join(__dirname, "..", "vendor");
-const packageBinaryPath = (vendorRoot) =>
-  path.join(vendorRoot, targetTriple, "bin", codexBinaryName);
-const legacyBinaryPath = (vendorRoot) =>
-  path.join(vendorRoot, targetTriple, "codex", codexBinaryName);
+const packageBinaryPaths = (vendorRoot) => [
+  path.join(vendorRoot, targetTriple, "bin", claudexBinaryName),
+  path.join(vendorRoot, targetTriple, "bin", codexBinaryName),
+];
+const legacyBinaryPaths = (vendorRoot) => [
+  path.join(vendorRoot, targetTriple, "codex", claudexBinaryName),
+  path.join(vendorRoot, targetTriple, "codex", codexBinaryName),
+];
 
 function resolveNativePackage(vendorRoot) {
   const packageRoot = path.join(vendorRoot, targetTriple);
-  const binaryPath = packageBinaryPath(vendorRoot);
-  if (existsSync(binaryPath)) {
-    return {
-      binaryPath,
-      pathDir: path.join(packageRoot, "codex-path"),
-    };
+  for (const binaryPath of packageBinaryPaths(vendorRoot)) {
+    if (existsSync(binaryPath)) {
+      return {
+        binaryPath,
+        pathDir: path.join(packageRoot, "codex-path"),
+      };
+    }
   }
 
-  const legacyPath = legacyBinaryPath(vendorRoot);
-  if (existsSync(legacyPath)) {
-    return {
-      binaryPath: legacyPath,
-      pathDir: path.join(packageRoot, "path"),
-    };
+  for (const legacyPath of legacyBinaryPaths(vendorRoot)) {
+    if (existsSync(legacyPath)) {
+      return {
+        binaryPath: legacyPath,
+        pathDir: path.join(packageRoot, "path"),
+      };
+    }
   }
 
   return null;
@@ -117,10 +120,10 @@ if (!nativePackage) {
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
-      ? "bun install -g @openai/codex@latest"
-      : "npm install -g @openai/codex@latest";
+      ? "bun install -g @bluehansl/claudex@latest"
+      : "npm install -g @bluehansl/claudex@latest";
   throw new Error(
-    `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
+    `Missing optional dependency ${platformPackage}. Reinstall Claudex: ${updateCommand}`,
   );
 }
 
@@ -143,7 +146,7 @@ function getUpdatedPath(newDirs) {
 }
 
 /**
- * Use heuristics to detect the package manager that was used to install Codex
+ * Use heuristics to detect the package manager that was used to install Claudex
  * in order to give the user a hint about how to update it.
  */
 function detectPackageManager() {

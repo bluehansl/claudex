@@ -3,17 +3,21 @@
 //! Project-level documentation is primarily stored in files named `AGENTS.md`.
 //! Additional fallback filenames can be configured via `project_doc_fallback_filenames`.
 //! We include the concatenation of all files found along the path from the
-//! project root to the current working directory as follows:
+//! instruction root to the current working directory as follows:
 //!
-//! 1.  Determine the project root by walking upwards from the current working
+//! 1.  If the current working directory is inside the user's home directory,
+//!     use the home directory as the instruction root. This allows user-level
+//!     and organization-level AGENTS.md files under the home directory to apply
+//!     consistently across multiple repositories.
+//! 2.  Otherwise, determine the project root by walking upwards from the current working
 //!     directory until a configured `project_root_markers` entry is found.
 //!     When `project_root_markers` is unset, the default marker list is used
 //!     (`.git`). If no marker is found, only the current working directory is
 //!     considered. An empty marker list disables parent traversal.
-//! 2.  Collect every `AGENTS.md` found from the project root down to the
+//! 3.  Collect every `AGENTS.md` found from the instruction root down to the
 //!     current working directory (inclusive) and concatenate their contents in
 //!     that order.
-//! 3.  We do **not** walk past the project root.
+//! 4.  We do **not** walk past the selected instruction root.
 
 use crate::config::Config;
 use codex_app_server_protocol::ConfigLayerSource;
@@ -253,6 +257,50 @@ impl<'a> AgentsMdManager<'a> {
             dir = AbsolutePathBuf::try_from(canon)?;
         }
 
+        let search_dirs: Vec<AbsolutePathBuf> = if let Some(root) = home_instruction_root(&dir)? {
+            let mut dirs = Vec::new();
+            let mut cursor = dir.clone();
+            loop {
+                dirs.push(cursor.clone());
+                if cursor == root {
+                    break;
+                }
+                let Some(parent) = cursor.parent() else {
+                    break;
+                };
+                cursor = parent;
+            }
+            dirs.reverse();
+            dirs
+        } else {
+            self.project_search_dirs(fs, &dir).await?
+        };
+
+        let mut found: Vec<AbsolutePathBuf> = Vec::new();
+        let candidate_filenames = self.candidate_filenames();
+        for d in search_dirs {
+            for name in &candidate_filenames {
+                let candidate = d.join(name);
+                match fs.get_metadata(&candidate, /*sandbox*/ None).await {
+                    Ok(md) if md.is_file => {
+                        found.push(candidate);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
+    async fn project_search_dirs(
+        &self,
+        fs: &dyn ExecutorFileSystem,
+        dir: &AbsolutePathBuf,
+    ) -> io::Result<Vec<AbsolutePathBuf>> {
         let mut merged = TomlValue::Table(toml::map::Map::new());
         for layer in self.config.config_layer_stack.get_layers(
             ConfigLayerStackOrdering::LowestPrecedenceFirst,
@@ -293,7 +341,7 @@ impl<'a> AgentsMdManager<'a> {
             }
         }
 
-        let search_dirs: Vec<AbsolutePathBuf> = if let Some(root) = project_root {
+        if let Some(root) = project_root {
             let mut dirs = Vec::new();
             let mut cursor = dir.clone();
             loop {
@@ -307,29 +355,10 @@ impl<'a> AgentsMdManager<'a> {
                 cursor = parent;
             }
             dirs.reverse();
-            dirs
+            Ok(dirs)
         } else {
-            vec![dir]
-        };
-
-        let mut found: Vec<AbsolutePathBuf> = Vec::new();
-        let candidate_filenames = self.candidate_filenames();
-        for d in search_dirs {
-            for name in &candidate_filenames {
-                let candidate = d.join(name);
-                match fs.get_metadata(&candidate, /*sandbox*/ None).await {
-                    Ok(md) if md.is_file => {
-                        found.push(candidate);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(err),
-                }
-            }
+            Ok(vec![dir.clone()])
         }
-
-        Ok(found)
     }
 
     fn candidate_filenames(&self) -> Vec<&str> {
@@ -347,6 +376,21 @@ impl<'a> AgentsMdManager<'a> {
             }
         }
         names
+    }
+}
+
+fn home_instruction_root(dir: &AbsolutePathBuf) -> io::Result<Option<AbsolutePathBuf>> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(None);
+    };
+    let Ok(home) = normalize_path(home) else {
+        return Ok(None);
+    };
+    let home = AbsolutePathBuf::try_from(home)?;
+    if dir.as_path().starts_with(home.as_path()) {
+        Ok(Some(home))
+    } else {
+        Ok(None)
     }
 }
 

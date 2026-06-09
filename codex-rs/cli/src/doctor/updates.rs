@@ -22,8 +22,7 @@ use super::npm_global_root_check;
 use super::run_command;
 
 const VERSION_FILE_NAME: &str = "version.json";
-const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
+const CLAUDEX_NPM_PACKAGE_URL: &str = "https://registry.npmjs.org/@bluehansl%2fclaudex";
 
 /// Builds the update-health row for the current installation.
 ///
@@ -73,7 +72,7 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
                 status = status.max(CheckStatus::Warning);
                 summary = "npm update target could not be proven".to_string();
                 remediation = Some(
-                    "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                    "Reinstall or update Claudex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
                         .to_string(),
                 );
             }
@@ -131,44 +130,29 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 
 fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
-        InstallMethod::Npm => "npm install -g @openai/codex",
-        InstallMethod::Bun => "bun install -g @openai/codex",
-        InstallMethod::Brew => "brew upgrade --cask codex",
-        InstallMethod::Standalone { .. } => "standalone installer",
+        InstallMethod::Npm => "npm install -g @bluehansl/claudex",
+        InstallMethod::Bun => "bun install -g @bluehansl/claudex",
+        InstallMethod::Brew | InstallMethod::Standalone { .. } => "manual or unknown",
         InstallMethod::Other => "manual or unknown",
     }
 }
 
-fn fetch_latest_version(context: &InstallContext) -> Result<String, String> {
-    match &context.method {
-        InstallMethod::Brew => fetch_homebrew_cask_version(),
-        InstallMethod::Npm
-        | InstallMethod::Bun
-        | InstallMethod::Standalone { .. }
-        | InstallMethod::Other => fetch_latest_github_release_version(),
-    }
+fn fetch_latest_version(_context: &InstallContext) -> Result<String, String> {
+    fetch_latest_npm_version()
 }
 
-fn fetch_latest_github_release_version() -> Result<String, String> {
+fn fetch_latest_npm_version() -> Result<String, String> {
     #[derive(Deserialize)]
-    struct ReleaseInfo {
-        tag_name: String,
+    struct PackageInfo {
+        #[serde(rename = "dist-tags")]
+        dist_tags: std::collections::HashMap<String, String>,
     }
 
-    let info = http_get_json::<ReleaseInfo>(GITHUB_LATEST_RELEASE_URL)?;
-    info.tag_name
-        .strip_prefix("rust-v")
-        .map(str::to_string)
-        .ok_or_else(|| format!("failed to parse latest tag {}", info.tag_name))
-}
-
-fn fetch_homebrew_cask_version() -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct HomebrewCaskInfo {
-        version: String,
-    }
-
-    http_get_json::<HomebrewCaskInfo>(HOMEBREW_CASK_API_URL).map(|info| info.version)
+    let info = http_get_json::<PackageInfo>(CLAUDEX_NPM_PACKAGE_URL)?;
+    info.dist_tags
+        .get("latest")
+        .cloned()
+        .ok_or_else(|| "npm package is missing latest dist-tag".to_string())
 }
 
 fn http_get_json<T>(url: &str) -> Result<T, String>
@@ -221,7 +205,7 @@ mod tests {
                 method: InstallMethod::Npm,
                 package_layout: None,
             }),
-            "npm install -g @openai/codex"
+            "npm install -g @bluehansl/claudex"
         );
         assert_eq!(
             update_action_label(&InstallContext {
