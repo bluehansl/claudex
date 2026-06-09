@@ -1,5 +1,6 @@
 use codex_config::ConfigLayerStack;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::LoadedAgentsMd;
 use codex_core::ModelClient;
 use codex_core::NewThread;
 use codex_core::Prompt;
@@ -364,7 +365,7 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
         .with_home(codex_home.clone())
         .with_config(|config| {
             // Ensure user instructions are NOT delivered on resume.
-            config.user_instructions = Some("be nice".to_string());
+            config.user_instructions = Some(LoadedAgentsMd::from_text_for_testing("be nice"));
         });
     let test = builder
         .resume(&server, codex_home, session_path.clone())
@@ -392,6 +393,7 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -487,6 +489,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
                     id: ThreadId::default(),
+                    parent_thread_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
@@ -617,6 +620,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
                     id: ThreadId::default(),
+                    parent_thread_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
@@ -758,6 +762,7 @@ async fn includes_session_id_thread_id_and_model_headers_in_request() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -871,7 +876,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
     let mut config = load_default_config_for_test(&codex_home).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
-    let effort = config.model_reasoning_effort;
+    let effort = config.model_reasoning_effort.clone();
     let summary = config.model_reasoning_summary;
     let model = codex_core::test_support::get_model_offline(config.model.as_deref());
     config.model = Some(model.clone());
@@ -900,6 +905,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
         provider,
         SessionSource::Exec,
+        /*parent_thread_id*/ None,
         config.model_verbosity,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
@@ -969,6 +975,7 @@ async fn includes_base_instructions_override_in_request() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1026,6 +1033,7 @@ async fn chatgpt_auth_sends_correct_request() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1150,6 +1158,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1172,7 +1181,7 @@ async fn includes_user_instructions_message_in_request() {
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("Test API Key"))
         .with_config(|config| {
-            config.user_instructions = Some("be nice".to_string());
+            config.user_instructions = Some(LoadedAgentsMd::from_text_for_testing("be nice"));
         });
     let codex = builder
         .build(&server)
@@ -1189,6 +1198,7 @@ async fn includes_user_instructions_message_in_request() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1277,6 +1287,7 @@ async fn includes_apps_guidance_as_developer_message_for_chatgpt_auth() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1340,6 +1351,7 @@ async fn omits_apps_guidance_for_api_key_auth_even_when_feature_enabled() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1399,6 +1411,7 @@ async fn omits_apps_guidance_when_configured_off() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1441,6 +1454,7 @@ async fn omits_environment_context_when_configured_off() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1498,6 +1512,7 @@ async fn skills_append_to_developer_message() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1581,6 +1596,7 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1642,6 +1658,7 @@ async fn includes_configured_effort_in_request() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1684,6 +1701,7 @@ async fn includes_no_effort_in_request() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1727,6 +1745,7 @@ async fn includes_default_reasoning_effort_in_request_when_defined_by_model_info
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1778,8 +1797,9 @@ async fn user_turn_collaboration_mode_overrides_model_and_effort() -> anyhow::Re
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(config.cwd.to_path_buf()),
+                cwd: Some(config.cwd.clone()),
                 approval_policy: Some(config.permissions.approval_policy.value()),
                 sandbox_policy: Some(config.legacy_sandbox_policy()),
                 summary: Some(
@@ -1834,6 +1854,7 @@ async fn configured_reasoning_summary_is_sent() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -1851,6 +1872,61 @@ async fn configured_reasoning_summary_is_sent() -> anyhow::Result<()> {
             .and_then(|value| value.as_str()),
         Some("concise")
     );
+    pretty_assertions::assert_eq!(
+        request_body
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("context")),
+        None
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_lite_sets_all_turns_context_and_disables_parallel_tool_calls()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.use_responses_lite = true;
+            model_info.supports_parallel_tool_calls = true;
+        })
+        .build(&server)
+        .await?;
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let request_body = resp_mock.single_request().body_json();
+    pretty_assertions::assert_eq!(
+        request_body
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("context"))
+            .and_then(|value| value.as_str()),
+        Some("all_turns")
+    );
+    pretty_assertions::assert_eq!(request_body.get("parallel_tool_calls"), Some(&json!(false)));
 
     Ok(())
 }
@@ -1899,8 +1975,9 @@ async fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() 
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                cwd: Some(config.cwd.to_path_buf()),
+                cwd: Some(config.cwd.clone()),
                 approval_policy: Some(config.permissions.approval_policy.value()),
                 sandbox_policy: Some(config.legacy_sandbox_policy()),
                 summary: Some(ReasoningSummary::Concise),
@@ -1959,6 +2036,7 @@ async fn reasoning_summary_is_omitted_when_disabled() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2018,6 +2096,7 @@ async fn reasoning_summary_none_overrides_model_catalog_default() -> anyhow::Res
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2057,6 +2136,7 @@ async fn includes_default_verbosity_in_request() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2105,6 +2185,7 @@ async fn configured_verbosity_not_sent_for_models_without_support() -> anyhow::R
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2152,6 +2233,7 @@ async fn configured_verbosity_is_sent() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2186,7 +2268,7 @@ async fn includes_developer_instructions_message_in_request() {
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("Test API Key"))
         .with_config(|config| {
-            config.user_instructions = Some("be nice".to_string());
+            config.user_instructions = Some(LoadedAgentsMd::from_text_for_testing("be nice"));
             config.developer_instructions = Some("be useful".to_string());
         });
     let codex = builder
@@ -2204,6 +2286,7 @@ async fn includes_developer_instructions_message_in_request() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2304,7 +2387,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
     let mut config = load_default_config_for_test(&codex_home).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
-    let effort = config.model_reasoning_effort;
+    let effort = config.model_reasoning_effort.clone();
     let summary = config.model_reasoning_summary;
     let model = codex_core::test_support::get_model_offline(config.model.as_deref());
     config.model = Some(model.clone());
@@ -2334,6 +2417,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
         provider.clone(),
         SessionSource::Exec,
+        /*parent_thread_id*/ None,
         config.model_verbosity,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
@@ -2500,6 +2584,7 @@ async fn token_count_includes_rate_limits_snapshot() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2551,6 +2636,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                     "resets_at": 1704074400
                 },
                 "credits": null,
+                "individual_limit": null,
                 "plan_type": null,
                 "rate_limit_reached_type": null
             }
@@ -2626,6 +2712,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             "resets_at": null
         },
         "credits": null,
+        "individual_limit": null,
         "plan_type": null,
         "rate_limit_reached_type": null
     });
@@ -2639,6 +2726,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -2716,6 +2804,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -2731,6 +2820,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -2816,6 +2906,7 @@ async fn incomplete_response_emits_content_filter_error_message() -> anyhow::Res
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -2927,6 +3018,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -3016,6 +3108,7 @@ async fn env_var_overrides_loaded_auth() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -3073,6 +3166,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -3089,6 +3183,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await
@@ -3105,6 +3200,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await

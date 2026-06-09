@@ -170,19 +170,21 @@ function detectPackageManager() {
   return userAgent ? "npm" : null;
 }
 
+const packageManagerEnvVar =
+  detectPackageManager() === "bun"
+    ? "CODEX_MANAGED_BY_BUN"
+    : "CODEX_MANAGED_BY_NPM";
 const additionalDirs = [];
 if (existsSync(pathDir)) {
   additionalDirs.push(pathDir);
 }
 const updatedPath = getUpdatedPath(additionalDirs);
-
-const env = { ...process.env, PATH: updatedPath };
-const packageManagerEnvVar =
-  detectPackageManager() === "bun"
-    ? "CODEX_MANAGED_BY_BUN"
-    : "CODEX_MANAGED_BY_NPM";
-env[packageManagerEnvVar] = "1";
-env.CODEX_MANAGED_PACKAGE_ROOT = realpathSync(path.join(__dirname, ".."));
+const env = {
+  ...process.env,
+  PATH: updatedPath,
+  [packageManagerEnvVar]: "1",
+  CODEX_MANAGED_PACKAGE_ROOT: realpathSync(path.join(__dirname, "..")),
+};
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",

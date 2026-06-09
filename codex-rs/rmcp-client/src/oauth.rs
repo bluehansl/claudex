@@ -21,12 +21,12 @@ use anyhow::Error;
 use anyhow::Result;
 use codex_config::types::OAuthCredentialsStoreMode;
 use oauth2::AccessToken;
-use oauth2::EmptyExtraTokenFields;
 use oauth2::RefreshToken;
 use oauth2::Scope;
 use oauth2::TokenResponse;
 use oauth2::basic::BasicTokenType;
 use rmcp::transport::auth::OAuthTokenResponse;
+use rmcp::transport::auth::VendorExtraTokenFields;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -113,7 +113,13 @@ fn refresh_expires_in_from_timestamp(tokens: &mut StoredOAuthTokens) {
             tokens.token_response.0.set_expires_in(Some(&duration));
         }
         None => {
-            tokens.token_response.0.set_expires_in(None);
+            // RMCP treats a missing expiry as unknown and uses the access token
+            // as-is. Treat a known-expired timestamp as an explicit zero so
+            // startup refreshes the token before the first request.
+            tokens
+                .token_response
+                .0
+                .set_expires_in(Some(&Duration::ZERO));
         }
     }
 }
@@ -403,7 +409,7 @@ fn load_oauth_tokens_from_file(server_name: &str, url: &str) -> Result<Option<St
         let mut token_response = OAuthTokenResponse::new(
             AccessToken::new(entry.access_token.clone()),
             BasicTokenType::Bearer,
-            EmptyExtraTokenFields {},
+            VendorExtraTokenFields::default(),
         );
 
         if let Some(refresh) = entry.refresh_token.clone() {
@@ -830,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_expires_in_from_timestamp_clears_expired_tokens() {
+    fn refresh_expires_in_from_timestamp_marks_expired_tokens() {
         let mut tokens = sample_tokens();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -843,7 +849,7 @@ mod tests {
 
         super::refresh_expires_in_from_timestamp(&mut tokens);
 
-        assert!(tokens.token_response.0.expires_in().is_none());
+        assert_eq!(tokens.token_response.0.expires_in(), Some(Duration::ZERO));
     }
 
     fn assert_tokens_match_without_expiry(
@@ -878,8 +884,8 @@ mod tests {
         );
         assert_eq!(actual_response.scopes(), expected_response.scopes());
         assert_eq!(
-            actual_response.extra_fields(),
-            expected_response.extra_fields()
+            actual_response.extra_fields().0,
+            expected_response.extra_fields().0
         );
         assert_eq!(
             actual_response.expires_in().is_some(),
@@ -891,7 +897,7 @@ mod tests {
         let mut response = OAuthTokenResponse::new(
             AccessToken::new("access-token".to_string()),
             BasicTokenType::Bearer,
-            EmptyExtraTokenFields {},
+            VendorExtraTokenFields::default(),
         );
         response.set_refresh_token(Some(RefreshToken::new("refresh-token".to_string())));
         response.set_scopes(Some(vec![

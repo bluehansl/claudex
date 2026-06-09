@@ -10,6 +10,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use core_test_support::TempDirExt;
 use core_test_support::assert_regex_match;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
@@ -97,7 +98,7 @@ async fn shell_command_tool_executes_command_and_streams_output() -> anyhow::Res
     let second_mock = responses::mount_sse_once(&server, second_response).await;
 
     let session_model = session_configured.model.clone();
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
 
@@ -110,6 +111,7 @@ async fn shell_command_tool_executes_command_and_streams_output() -> anyhow::Res
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -178,7 +180,7 @@ async fn update_plan_tool_emits_plan_update_event() -> anyhow::Result<()> {
     let second_mock = responses::mount_sse_once(&server, second_response).await;
 
     let session_model = session_configured.model.clone();
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
 
@@ -191,6 +193,7 @@ async fn update_plan_tool_emits_plan_update_event() -> anyhow::Result<()> {
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -269,7 +272,7 @@ async fn update_plan_tool_rejects_malformed_payload() -> anyhow::Result<()> {
     let second_mock = responses::mount_sse_once(&server, second_response).await;
 
     let session_model = session_configured.model.clone();
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
 
@@ -282,6 +285,7 @@ async fn update_plan_tool_rejects_malformed_payload() -> anyhow::Result<()> {
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -370,7 +374,7 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
     let second_mock = responses::mount_sse_once(&server, second_response).await;
 
     let session_model = session_configured.model.clone();
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
 
@@ -383,6 +387,7 @@ async fn apply_patch_tool_executes_and_emits_patch_events() -> anyhow::Result<()
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -508,7 +513,7 @@ async fn apply_patch_reports_parse_diagnostics() -> anyhow::Result<()> {
     let second_mock = responses::mount_sse_once(&server, second_response).await;
 
     let session_model = session_configured.model.clone();
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
 
@@ -521,6 +526,7 @@ async fn apply_patch_reports_parse_diagnostics() -> anyhow::Result<()> {
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),

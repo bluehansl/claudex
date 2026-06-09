@@ -233,6 +233,7 @@ impl ChatWidget {
             | ServerNotification::RemoteControlStatusChanged(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::FsChanged(_)
+            | ServerNotification::TurnModerationMetadata(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
             | ServerNotification::ThreadRealtimeTranscriptDelta(_)
@@ -332,10 +333,8 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
-            ThreadItem::EnteredReviewMode { review, .. } => {
-                if !from_replay {
-                    self.enter_review_mode_with_hint(review, /*from_replay*/ false);
-                }
+            ThreadItem::EnteredReviewMode { review, .. } if !from_replay => {
+                self.enter_review_mode_with_hint(review, /*from_replay*/ false);
             }
             _ => {}
         }

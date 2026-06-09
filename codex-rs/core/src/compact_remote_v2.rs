@@ -16,15 +16,16 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::turn::built_tools;
 use crate::session::turn_context::TurnContext;
-use crate::util::backoff;
+use crate::turn_metadata::CompactionTurnMetadata;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
-use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
@@ -33,9 +34,9 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
@@ -43,7 +44,6 @@ use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use tracing::warn;
 
 // Mirror the current /responses/compact retained-message default while the
 // server-side path remains the reference implementation.
@@ -106,6 +106,13 @@ async fn run_remote_compact_task_inner(
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
+    let compaction_metadata = CompactionTurnMetadata::new(
+        trigger,
+        reason,
+        CompactionImplementation::ResponsesCompactionV2,
+        phase,
+    );
+    let mut active_context_tokens_before = sess.get_total_token_usage().await;
     let attempt = CompactionAnalyticsAttempt::begin(
         sess.as_ref(),
         turn_context.as_ref(),
@@ -125,6 +132,7 @@ async fn run_remote_compact_task_inner(
                     sess.as_ref(),
                     codex_analytics::CompactionStatus::Interrupted,
                     Some(error),
+                    Some(active_context_tokens_before),
                 )
                 .await;
             return Err(CodexErr::TurnAborted);
@@ -135,6 +143,8 @@ async fn run_remote_compact_task_inner(
         turn_context,
         client_session,
         initial_context_injection,
+        compaction_metadata,
+        &mut active_context_tokens_before,
     )
     .await;
     let status = compaction_status_from_result(&result);
@@ -142,12 +152,27 @@ async fn run_remote_compact_task_inner(
     if result.is_ok() {
         let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
         if let PostCompactHookOutcome::Stopped = post_compact_outcome {
-            attempt.track(sess.as_ref(), status, error).await;
+            attempt
+                .track(
+                    sess.as_ref(),
+                    status,
+                    error,
+                    Some(active_context_tokens_before),
+                )
+                .await;
             return Err(CodexErr::TurnAborted);
         }
     }
-    attempt.track(sess.as_ref(), status, error.clone()).await;
+    attempt
+        .track(
+            sess.as_ref(),
+            status,
+            error.clone(),
+            Some(active_context_tokens_before),
+        )
+        .await;
     if let Err(err) = result {
+        sess.track_turn_codex_error(turn_context, &err);
         let event = EventMsg::Error(
             err.to_error_event(Some("Error running remote compact task".to_string())),
         );
@@ -162,6 +187,8 @@ async fn run_remote_compact_task_inner_impl(
     turn_context: &Arc<TurnContext>,
     client_session: Option<&mut ModelClientSession>,
     initial_context_injection: InitialContextInjection,
+    compaction_metadata: CompactionTurnMetadata,
+    active_context_tokens_before: &mut i64,
 ) -> CodexResult<()> {
     let context_compaction_item = ContextCompactionItem::new();
     let compaction_trace = sess.services.rollout_thread_trace.compaction_trace_context(
@@ -176,17 +203,26 @@ async fn run_remote_compact_task_inner_impl(
 
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
-    let deleted_items = trim_function_call_history_to_fit_context_window(
-        &mut history,
-        turn_context.as_ref(),
-        &base_instructions,
-    );
-    if deleted_items > 0 {
+    let (rewritten_outputs, estimated_deleted_tokens) =
+        trim_function_call_history_to_fit_context_window(
+            &mut history,
+            turn_context.as_ref(),
+            &base_instructions,
+        );
+    if rewritten_outputs > 0 {
         info!(
             turn_id = %turn_context.sub_id,
-            deleted_items,
-            "trimmed history items before remote compaction v2"
+            rewritten_outputs,
+            "rewrote history outputs before remote compaction v2"
         );
+    }
+    if estimated_deleted_tokens > 0 {
+        let max_local_deleted_tokens = sess
+            .get_total_token_usage_breakdown()
+            .await
+            .estimated_tokens_of_items_added_since_last_successful_api_response;
+        *active_context_tokens_before = (*active_context_tokens_before)
+            .saturating_sub(estimated_deleted_tokens.min(max_local_deleted_tokens));
     }
 
     let trace_input_history = history.raw_items().to_vec();
@@ -209,7 +245,10 @@ async fn run_remote_compact_task_inner_impl(
         output_schema_strict: true,
     };
 
-    let turn_metadata_header = turn_context.turn_metadata_state.current_header_value();
+    let window_id = sess.services.model_client.current_window_id();
+    let turn_metadata_header = turn_context
+        .turn_metadata_state
+        .current_header_value_for_compaction(&window_id, compaction_metadata);
     let trace_attempt = compaction_trace.start_attempt(&serde_json::json!({
         "model": turn_context.model_info.slug.as_str(),
         "instructions": prompt.base_instructions.text.as_str(),
@@ -237,9 +276,15 @@ async fn run_remote_compact_task_inner_impl(
     trace_attempt.record_result(
         compaction_output_result
             .as_ref()
-            .map(|(item, _)| std::slice::from_ref(item)),
+            .map(|output| std::slice::from_ref(&output.compaction_output)),
     );
-    let (compaction_output, response_id) = compaction_output_result?;
+    let RemoteCompactionV2Output {
+        compaction_output,
+        token_usage,
+    } = compaction_output_result?;
+    if let Some(token_usage) = token_usage {
+        *active_context_tokens_before = token_usage.input_tokens;
+    }
     let compacted_history = build_v2_compacted_history(&prompt_input, compaction_output);
     let new_history = process_compacted_history(
         sess.as_ref(),
@@ -267,13 +312,12 @@ async fn run_remote_compact_task_inner_impl(
 
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
-    if turn_context
-        .features
-        .enabled(Feature::ResponsesWebsocketResponseProcessed)
-    {
-        client_session.send_response_processed(&response_id).await;
-    }
     Ok(())
+}
+
+struct RemoteCompactionV2Output {
+    compaction_output: ResponseItem,
+    token_usage: Option<TokenUsage>,
 }
 
 async fn run_remote_compaction_request_v2(
@@ -282,7 +326,7 @@ async fn run_remote_compaction_request_v2(
     client_session: &mut ModelClientSession,
     prompt: &Prompt,
     turn_metadata_header: Option<&str>,
-) -> CodexResult<(ResponseItem, String)> {
+) -> CodexResult<RemoteCompactionV2Output> {
     let max_retries = turn_context
         .provider
         .info()
@@ -295,7 +339,7 @@ async fn run_remote_compaction_request_v2(
                 prompt,
                 &turn_context.model_info,
                 &turn_context.session_telemetry,
-                turn_context.reasoning_effort,
+                turn_context.reasoning_effort.clone(),
                 turn_context.reasoning_summary,
                 turn_context.config.service_tier.clone(),
                 turn_metadata_header,
@@ -313,56 +357,21 @@ async fn run_remote_compaction_request_v2(
                 log_remote_compaction_request_failure(sess, turn_context, prompt, &err).await;
                 return Err(err);
             }
-            Err(err)
-                if retries >= max_retries
-                    && client_session.try_switch_fallback_transport(
-                        &turn_context.session_telemetry,
-                        &turn_context.model_info,
-                    ) =>
-            {
-                sess.send_event(
-                    turn_context,
-                    EventMsg::Warning(WarningEvent {
-                        message: format!(
-                            "Falling back from WebSockets to HTTPS transport. {err:#}"
-                        ),
-                    }),
-                )
-                .await;
-                retries = 0;
-            }
-            Err(err) if retries < max_retries => {
-                retries += 1;
-                let delay = match &err {
-                    CodexErr::Stream(_, requested_delay) => {
-                        requested_delay.unwrap_or_else(|| backoff(retries))
-                    }
-                    _ => backoff(retries),
-                };
-                warn!(
-                    turn_id = %turn_context.sub_id,
-                    retries,
-                    max_retries,
-                    compact_error = %err,
-                    "remote compaction v2 stream failed; retrying request after delay"
-                );
-
-                let report_error = retries > 1
-                    || cfg!(debug_assertions)
-                    || !sess.services.model_client.responses_websocket_enabled();
-                if report_error {
-                    sess.notify_stream_error(
-                        turn_context,
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        err,
-                    )
-                    .await;
-                }
-                tokio::time::sleep(delay).await;
-            }
             Err(err) => {
-                log_remote_compaction_request_failure(sess, turn_context, prompt, &err).await;
-                return Err(err);
+                if let Err(err) = handle_retryable_response_stream_error(
+                    &mut retries,
+                    max_retries,
+                    err,
+                    client_session,
+                    sess,
+                    turn_context,
+                    ResponsesStreamRequest::RemoteCompactionV2,
+                )
+                .await
+                {
+                    log_remote_compaction_request_failure(sess, turn_context, prompt, &err).await;
+                    return Err(err);
+                }
             }
         }
     }
@@ -387,11 +396,12 @@ async fn log_remote_compaction_request_failure(
 
 async fn collect_compaction_output(
     mut stream: ResponseStream,
-) -> CodexResult<(ResponseItem, String)> {
+) -> CodexResult<RemoteCompactionV2Output> {
     let mut output_item_count = 0usize;
     let mut compaction_count = 0usize;
     let mut compaction_output = None;
-    let mut completed_response_id = None;
+    let mut saw_completed = false;
+    let mut completed_token_usage = None;
     while let Some(event) = stream.next().await {
         match event? {
             ResponseEvent::OutputItemDone(item) => {
@@ -403,20 +413,21 @@ async fn collect_compaction_output(
                     }
                 }
             }
-            ResponseEvent::Completed { response_id, .. } => {
-                completed_response_id = Some(response_id);
+            ResponseEvent::Completed { token_usage, .. } => {
+                saw_completed = true;
+                completed_token_usage = token_usage;
                 break;
             }
             _ => {}
         }
     }
 
-    let Some(response_id) = completed_response_id else {
+    if !saw_completed {
         return Err(CodexErr::Stream(
             "remote compaction v2 stream closed before response.completed".to_string(),
             None,
         ));
-    };
+    }
 
     if compaction_count != 1 {
         return Err(CodexErr::Fatal(format!(
@@ -427,7 +438,10 @@ async fn collect_compaction_output(
     let Some(compaction_output) = compaction_output else {
         unreachable!("compaction output must exist when count is exactly one");
     };
-    Ok((compaction_output, response_id))
+    Ok(RemoteCompactionV2Output {
+        compaction_output,
+        token_usage: completed_token_usage,
+    })
 }
 
 fn build_v2_compacted_history(
@@ -760,16 +774,31 @@ mod tests {
             Ok(ResponseEvent::OutputItemDone(compaction.clone())),
             Ok(ResponseEvent::Completed {
                 response_id: "resp-compact".to_string(),
-                token_usage: None,
+                token_usage: Some(TokenUsage {
+                    input_tokens: 123_456,
+                    cached_input_tokens: 7_890,
+                    output_tokens: 42,
+                    reasoning_output_tokens: 5,
+                    total_tokens: 123_498,
+                }),
                 end_turn: Some(true),
             }),
         ]);
 
-        let (output, response_id) = collect_compaction_output(stream)
+        let output = collect_compaction_output(stream)
             .await
             .expect("compaction should be collected");
 
-        assert_eq!(output, compaction);
-        assert_eq!(response_id, "resp-compact");
+        assert_eq!(output.compaction_output, compaction);
+        assert_eq!(
+            output.token_usage,
+            Some(TokenUsage {
+                input_tokens: 123_456,
+                cached_input_tokens: 7_890,
+                output_tokens: 42,
+                reasoning_output_tokens: 5,
+                total_tokens: 123_498,
+            })
+        );
     }
 }

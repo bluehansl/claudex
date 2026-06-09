@@ -23,6 +23,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use core_test_support::TempDirExt;
 use core_test_support::load_default_config_for_test;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -160,6 +161,7 @@ async fn remote_models_config_context_window_override_clamps_to_max_context_wind
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -227,6 +229,7 @@ async fn remote_models_config_override_above_max_uses_max_context_window() -> Re
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -293,6 +296,7 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -315,7 +319,7 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<()> {
+async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
@@ -328,15 +332,16 @@ async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<(
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    remote_model.default_reasoning_level = Some(ReasoningEffort::High);
+    let custom_reasoning_effort = ReasoningEffort::Custom("max".to_string());
+    remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         },
         ReasoningEffortPreset {
-            effort: ReasoningEffort::High,
-            description: ReasoningEffort::High.to_string(),
+            effort: custom_reasoning_effort.clone(),
+            description: custom_reasoning_effort.to_string(),
         },
     ];
     remote_model.supports_reasoning_summaries = true;
@@ -372,6 +377,7 @@ async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<(
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -389,7 +395,7 @@ async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<(
         .and_then(|reasoning| reasoning.get("summary"))
         .and_then(|value| value.as_str());
     assert_eq!(body["model"].as_str(), Some(requested_model));
-    assert_eq!(reasoning_effort, Some("high"));
+    assert_eq!(reasoning_effort, Some("max"));
     assert_eq!(reasoning_summary, Some("detailed"));
 
     Ok(())
@@ -422,6 +428,7 @@ async fn namespaced_model_slug_uses_catalog_metadata_without_fallback_warning() 
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -472,6 +479,10 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        use_responses_lite: false,
+        auto_review_model_override: None,
+        tool_mode: None,
+        multi_agent_version: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -563,7 +574,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
     ];
     mount_sse_sequence(&server, responses).await;
 
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
     codex
@@ -575,6 +586,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -720,6 +732,10 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        use_responses_lite: false,
+        auto_review_model_override: None,
+        tool_mode: None,
+        multi_agent_version: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -786,7 +802,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
     )
     .await?;
 
-    let cwd_path = cwd.path().to_path_buf();
+    let cwd_path = cwd.abs();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd_path.as_path());
     codex
@@ -798,6 +814,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
             environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
                 cwd: Some(cwd_path),
                 approval_policy: Some(AskForApproval::Never),
@@ -1202,6 +1219,10 @@ fn test_remote_model_with_policy(
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
         supports_search_tool: false,
+        use_responses_lite: false,
+        auto_review_model_override: None,
+        tool_mode: None,
+        multi_agent_version: None,
         priority,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

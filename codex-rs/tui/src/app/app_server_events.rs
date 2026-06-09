@@ -77,7 +77,7 @@ impl App {
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
                 self.chat_widget
-                    .on_rate_limit_snapshot(Some(notification.rate_limits.clone()));
+                    .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
@@ -87,10 +87,9 @@ impl App {
                         notification.plan_type,
                     ),
                     notification.plan_type,
-                    matches!(
-                        notification.auth_mode,
-                        Some(AuthMode::Chatgpt) | Some(AuthMode::ChatgptAuthTokens)
-                    ),
+                    notification
+                        .auth_mode
+                        .is_some_and(AuthMode::has_chatgpt_account),
                 );
                 return;
             }

@@ -66,12 +66,17 @@ use serde::Serialize;
 use supports_color::Stream;
 
 mod background;
+mod git;
 mod output;
 mod progress;
 mod runtime;
+mod system;
+mod thread_inventory;
+mod title;
 mod updates;
 
 use background::background_server_check;
+use git::git_check;
 use output::HumanOutputOptions;
 use output::redact_detail;
 use output::render_human_report;
@@ -79,6 +84,9 @@ use progress::DoctorProgress;
 use progress::doctor_progress;
 use runtime::runtime_check;
 use runtime::search_check;
+use system::system_check;
+use thread_inventory::thread_inventory_check;
+use title::terminal_title_check;
 use updates::updates_check;
 
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -330,6 +338,7 @@ async fn build_report(
 ) -> DoctorReport {
     let progress = doctor_progress(command.json);
     let mut checks = Vec::new();
+    checks.push(run_sync_check("system", progress.clone(), system_check));
     checks.push(run_sync_check("installation", progress.clone(), || {
         installation_check(!command.summary)
     }));
@@ -352,7 +361,10 @@ async fn build_report(
                 mcp_check,
                 sandbox_check,
                 terminal_check,
+                git_check,
+                terminal_title_check,
                 state_check,
+                thread_inventory_check,
                 background_server_check,
                 reachability_check,
             ) = tokio::join!(
@@ -376,12 +388,23 @@ async fn build_report(
                         terminal_check(command.no_color)
                     })
                 },
-                run_async_check("state", progress.clone(), state_check(config)),
+                run_async_check("git", progress.clone(), git_check(config.cwd.as_path())),
                 async {
-                    run_sync_check("app-server", progress.clone(), || {
-                        background_server_check(config)
+                    run_sync_check("terminal title", progress.clone(), || {
+                        terminal_title_check(config)
                     })
                 },
+                run_async_check("state", progress.clone(), state_check(config)),
+                run_async_check(
+                    "thread inventory",
+                    progress.clone(),
+                    thread_inventory_check(config),
+                ),
+                run_async_check(
+                    "app-server",
+                    progress.clone(),
+                    background_server_check(config)
+                ),
                 run_async_check(
                     "provider reachability",
                     progress.clone(),
@@ -397,14 +420,28 @@ async fn build_report(
                 mcp_check,
                 sandbox_check,
                 terminal_check,
+                git_check,
+                terminal_title_check,
                 state_check,
+                thread_inventory_check,
                 background_server_check,
                 reachability_check,
             ]);
         }
         Err(err) => {
             let reachability_plan = default_reachability_plan();
-            let (config_check, network_check, terminal_check, state_check, reachability_check) = tokio::join!(
+            let fallback_cwd = interactive
+                .cwd
+                .clone()
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let (
+                config_check,
+                network_check,
+                terminal_check,
+                git_check,
+                state_check,
+                reachability_check,
+            ) = tokio::join!(
                 async {
                     run_sync_check("config", progress.clone(), || {
                         DoctorCheck::new(
@@ -423,6 +460,7 @@ async fn build_report(
                         terminal_check(command.no_color)
                     })
                 },
+                run_async_check("git", progress.clone(), git_check(fallback_cwd.as_path())),
                 async { run_sync_check("state", progress.clone(), fallback_state_check) },
                 run_async_check(
                     "provider reachability",
@@ -434,6 +472,7 @@ async fn build_report(
                 config_check,
                 network_check,
                 terminal_check,
+                git_check,
                 state_check,
                 reachability_check,
             ]);
@@ -792,7 +831,7 @@ fn installation_check(show_details: bool) -> DoctorCheck {
                 status = status.max(CheckStatus::Warning);
                 summary = "npm-managed launch is missing package-root provenance".to_string();
                 remediation = Some(
-                    "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                    "Reinstall or update Claudex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
                         .to_string(),
                 );
             }
@@ -945,7 +984,7 @@ fn npm_global_root_check() -> NpmRootCheck {
 }
 
 fn compare_npm_package_roots(running_package_root: &Path, npm_root: &Path) -> NpmRootCheck {
-    let npm_package_root = npm_root.join("@openai").join("codex");
+    let npm_package_root = npm_root.join("@bluehansl").join("claudex");
     let running = normalize_path_for_compare(running_package_root);
     let target = normalize_path_for_compare(&npm_package_root);
     if running == target {
@@ -1034,6 +1073,7 @@ fn config_check(config: &Config) -> DoctorCheck {
     let status = if config.startup_warnings.is_empty() {
         CheckStatus::Ok
     } else {
+        push_startup_warning_counts(&mut details, &config.startup_warnings);
         details.extend(
             config
                 .startup_warnings
@@ -1044,6 +1084,23 @@ fn config_check(config: &Config) -> DoctorCheck {
     };
 
     DoctorCheck::new("config.load", "config", status, "config loaded").details(details)
+}
+
+fn push_startup_warning_counts(details: &mut Vec<String>, warnings: &[String]) {
+    details.push(format!("startup warnings: {}", warnings.len()));
+    for (label, needle) in [
+        ("startup warning skills", "skill"),
+        ("startup warning hooks", "hook"),
+        ("startup warning plugins", "plugin"),
+        ("startup warning MCP", "mcp"),
+        ("startup warning deprecated", "deprecated"),
+    ] {
+        let count = warnings
+            .iter()
+            .filter(|warning| warning.to_ascii_lowercase().contains(needle))
+            .count();
+        details.push(format!("{label}: {count}"));
+    }
 }
 
 fn feature_flag_details(config: &Config, details: &mut Vec<String>) {
@@ -1251,6 +1308,7 @@ fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
         codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
         codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
         codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        codex_app_server_protocol::AuthMode::PersonalAccessToken => "personal_access_token",
     }
 }
 
@@ -1260,6 +1318,8 @@ fn stored_auth_mode_value(auth: &AuthDotJson) -> codex_app_server_protocol::Auth
     }
     if auth.openai_api_key.is_some() {
         codex_app_server_protocol::AuthMode::ApiKey
+    } else if auth.personal_access_token.is_some() {
+        codex_app_server_protocol::AuthMode::PersonalAccessToken
     } else {
         codex_app_server_protocol::AuthMode::Chatgpt
     }
@@ -1321,6 +1381,15 @@ fn stored_auth_issues(
                 .is_none_or(|token| token.trim().is_empty())
             {
                 issues.push("agent identity auth is missing an agent identity token");
+            }
+        }
+        codex_app_server_protocol::AuthMode::PersonalAccessToken => {
+            if auth
+                .personal_access_token
+                .as_deref()
+                .is_none_or(|token| token.trim().is_empty())
+            {
+                issues.push("personal access token auth is missing a personal access token");
             }
         }
     }
@@ -1579,6 +1648,7 @@ struct TerminalCheckInputs {
     stream_supports_color: bool,
     terminal_size: Result<(u16, u16), String>,
     tmux_details: Vec<String>,
+    windows_console_details: Vec<String>,
 }
 
 impl TerminalCheckInputs {
@@ -1592,6 +1662,7 @@ impl TerminalCheckInputs {
         } else {
             Vec::new()
         };
+        let windows_console_details = windows_console_details();
         Self {
             info,
             env,
@@ -1603,6 +1674,7 @@ impl TerminalCheckInputs {
             stream_supports_color: supports_color::on(Stream::Stdout).is_some(),
             terminal_size,
             tmux_details,
+            windows_console_details,
         }
     }
 
@@ -1617,6 +1689,51 @@ impl TerminalCheckInputs {
 
 fn terminal_check(no_color_flag: bool) -> DoctorCheck {
     terminal_check_from_inputs(TerminalCheckInputs::detect(no_color_flag))
+}
+
+#[cfg(windows)]
+fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    use windows_sys::Win32::System::Console::GetConsoleCP;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    use windows_sys::Win32::System::Console::GetStdHandle;
+    use windows_sys::Win32::System::Console::STD_ERROR_HANDLE;
+    use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+
+    let mut details = Vec::new();
+    details.push(format!("console input code page: {}", unsafe {
+        GetConsoleCP()
+    }));
+    details.push(format!("console output code page: {}", unsafe {
+        GetConsoleOutputCP()
+    }));
+    details.push(console_mode_detail("stdout console mode", unsafe {
+        GetStdHandle(STD_OUTPUT_HANDLE)
+    }));
+    details.push(console_mode_detail("stderr console mode", unsafe {
+        GetStdHandle(STD_ERROR_HANDLE)
+    }));
+
+    fn console_mode_detail(label: &str, handle: isize) -> String {
+        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+            return format!("{label}: unavailable");
+        }
+        let mut mode = 0_u32;
+        if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+            return format!("{label}: unavailable");
+        }
+        let vt_enabled = mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0;
+        format!("{label}: 0x{mode:08x} (VT processing: {vt_enabled})")
+    }
+
+    details
+}
+
+#[cfg(not(windows))]
+fn windows_console_details() -> Vec<String> {
+    Vec::new()
 }
 
 fn terminal_check_from_inputs(inputs: TerminalCheckInputs) -> DoctorCheck {
@@ -1652,6 +1769,7 @@ fn terminal_check_from_inputs(inputs: TerminalCheckInputs) -> DoctorCheck {
     }
     push_presence_env_values(&mut details, &inputs, REMOTE_TERMINAL_ENV_VARS);
     details.extend(inputs.tmux_details.iter().cloned());
+    details.extend(inputs.windows_console_details.iter().cloned());
 
     let locale_warning = locale.as_deref().is_some_and(is_non_utf8_locale);
     let mut issues = Vec::new();
@@ -2070,11 +2188,7 @@ struct RolloutStats {
 
 impl RolloutStats {
     fn average_bytes(&self) -> u64 {
-        if self.files == 0 {
-            0
-        } else {
-            self.total_bytes / self.files
-        }
+        self.total_bytes.checked_div(self.files).unwrap_or(0)
     }
 }
 
@@ -2306,6 +2420,7 @@ fn auth_mode_name(auth: &CodexAuth) -> &'static str {
         codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
         codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
         codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        codex_app_server_protocol::AuthMode::PersonalAccessToken => "personal_access_token",
     }
 }
 
@@ -2439,7 +2554,8 @@ fn provider_auth_reachability_mode_from_auth(
         Some(
             codex_app_server_protocol::AuthMode::Chatgpt
             | codex_app_server_protocol::AuthMode::ChatgptAuthTokens
-            | codex_app_server_protocol::AuthMode::AgentIdentity,
+            | codex_app_server_protocol::AuthMode::AgentIdentity
+            | codex_app_server_protocol::AuthMode::PersonalAccessToken,
         )
         | None => ProviderAuthReachabilityMode::Chatgpt,
     }
@@ -3031,6 +3147,31 @@ mod tests {
     }
 
     #[test]
+    fn startup_warning_counts_group_known_sources() {
+        let warnings = vec![
+            "Skipped loading 2 skill(s) due to invalid SKILL.md files.".to_string(),
+            "[features].codex_hooks is deprecated. Use [features].hooks instead.".to_string(),
+            "plugin example failed to load".to_string(),
+            "MCP server example failed to start".to_string(),
+        ];
+        let mut details = Vec::new();
+
+        push_startup_warning_counts(&mut details, &warnings);
+
+        assert_eq!(
+            details,
+            vec![
+                "startup warnings: 4",
+                "startup warning skills: 1",
+                "startup warning hooks: 1",
+                "startup warning plugins: 1",
+                "startup warning MCP: 1",
+                "startup warning deprecated: 1",
+            ]
+        );
+    }
+
+    #[test]
     fn config_overrides_from_interactive_preserves_global_options() {
         let interactive = TuiCli::parse_from([
             "codex",
@@ -3274,6 +3415,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
         };
 
         assert_eq!(
@@ -3291,6 +3433,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
         };
 
         assert_eq!(
@@ -3303,6 +3446,28 @@ mod tests {
     }
 
     #[test]
+    fn stored_auth_validation_handles_personal_access_token() {
+        let mut auth = AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: Some("at-test".to_string()),
+        };
+
+        assert_eq!(stored_auth_mode(&auth), "personal_access_token");
+        assert!(stored_auth_issues(&auth, |_| false).is_empty());
+
+        auth.auth_mode = Some(codex_app_server_protocol::AuthMode::PersonalAccessToken);
+        auth.personal_access_token = None;
+        assert_eq!(
+            stored_auth_issues(&auth, |_| false),
+            vec!["personal access token auth is missing a personal access token"]
+        );
+    }
+
+    #[test]
     fn provider_reachability_mode_uses_api_key_auth() {
         let api_key_auth = AuthDotJson {
             auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
@@ -3310,6 +3475,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
         };
 
         assert_eq!(
@@ -3723,6 +3889,7 @@ mod tests {
             stream_supports_color: true,
             terminal_size: Ok((120, 40)),
             tmux_details: Vec::new(),
+            windows_console_details: Vec::new(),
         }
     }
 
@@ -3853,6 +4020,22 @@ mod tests {
                 .details
                 .iter()
                 .any(|detail| detail.contains("10.0.0.1"))
+        );
+    }
+
+    #[test]
+    fn terminal_check_includes_windows_console_details() {
+        let mut inputs = terminal_inputs();
+        inputs
+            .windows_console_details
+            .push("stdout console mode: 0x00000004 (VT processing: true)".to_string());
+
+        let check = terminal_check_from_inputs(inputs);
+
+        assert!(
+            check
+                .details
+                .contains(&"stdout console mode: 0x00000004 (VT processing: true)".to_string())
         );
     }
 
