@@ -63,7 +63,7 @@ jobs:
       - name: Check package filter
         shell: bash
         env:
-          PACKAGE_FILTER: ${{ inputs.packages || 'all' }}
+          PACKAGE_FILTER: ${{ github.event.client_payload.packages || inputs.packages || 'core' }}
           MATRIX_PACKAGE: ${{ matrix.package }}
           MATRIX_NPM_TAG: ${{ matrix.npm_tag }}
         run: |
