@@ -58,6 +58,12 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
     },
 }
 
+CORE_PLATFORM_PACKAGES: tuple[str, ...] = (
+    "claudex-darwin-arm64",
+    "claudex-win32-x64",
+    "claudex-linux-x64",
+)
+
 PACKAGE_EXPANSIONS: dict[str, list[str]] = {
     "claudex": ["claudex", *CODEX_PLATFORM_PACKAGES],
 }
@@ -122,6 +128,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Directory containing pre-installed native binaries to bundle (vendor root).",
     )
+    parser.add_argument(
+        "--root-platforms",
+        default="core",
+        help=(
+            "Platform optional dependencies to include in the root Claudex package. "
+            "Use 'all', 'core', or a comma-separated list of npm tags/package names. "
+            "Core means darwin-arm64, win32-x64, and linux-x64."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -142,7 +157,8 @@ def main() -> int:
     staging_dir, created_temp = prepare_staging_dir(args.staging_dir)
 
     try:
-        stage_sources(staging_dir, version, package)
+        root_platform_packages = resolve_root_platform_packages(args.root_platforms)
+        stage_sources(staging_dir, version, package, root_platform_packages)
 
         vendor_src = args.vendor_src.resolve() if args.vendor_src else None
         native_components = PACKAGE_NATIVE_COMPONENTS.get(package, [])
@@ -218,7 +234,41 @@ def prepare_staging_dir(staging_dir: Path | None) -> tuple[Path, bool]:
     return temp_dir, True
 
 
-def stage_sources(staging_dir: Path, version: str, package: str) -> None:
+def resolve_root_platform_packages(root_platforms: str) -> tuple[str, ...]:
+    if root_platforms == "all":
+        return tuple(CODEX_PLATFORM_PACKAGES)
+    if root_platforms == "core":
+        return CORE_PLATFORM_PACKAGES
+
+    by_token: dict[str, str] = {}
+    for package_name, package_config in CODEX_PLATFORM_PACKAGES.items():
+        by_token[package_name] = package_name
+        by_token[package_config["npm_tag"]] = package_name
+
+    selected: list[str] = []
+    for raw_token in root_platforms.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        package_name = by_token.get(token)
+        if package_name is None:
+            valid = ", ".join(["all", "core", *by_token])
+            raise RuntimeError(f"Unknown root platform '{token}'. Valid values: {valid}")
+        if package_name not in selected:
+            selected.append(package_name)
+
+    if not selected:
+        raise RuntimeError("--root-platforms must include at least one platform.")
+
+    return tuple(selected)
+
+
+def stage_sources(
+    staging_dir: Path,
+    version: str,
+    package: str,
+    root_platform_packages: tuple[str, ...],
+) -> None:
     package_json: dict
     package_json_path: Path | None = None
 
@@ -293,8 +343,7 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
                 f"npm:{CODEX_NPM_NAME}@"
                 f"{compute_platform_package_version(version, CODEX_PLATFORM_PACKAGES[platform_package]['npm_tag'])}"
             )
-            for platform_package in PACKAGE_EXPANSIONS["claudex"]
-            if platform_package != "claudex"
+            for platform_package in root_platform_packages
         }
 
     elif package == "codex-sdk":

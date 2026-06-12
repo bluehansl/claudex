@@ -21,9 +21,9 @@ on:
         required: true
         default: "0.1.0"
       packages:
-        description: "Package filter: all, win32, win32-x64, win32-arm64, darwin-arm64, linux-x64, linux-arm64"
+        description: "Package filter: core, all, win32, linux, darwin, npm tags, package names, or a comma-separated list"
         required: false
-        default: "all"
+        default: "core"
 
 jobs:
   package:
@@ -69,20 +69,29 @@ jobs:
         run: |
           set -euo pipefail
           should_build=false
-          case "${PACKAGE_FILTER}" in
-            ""|"all"|${MATRIX_PACKAGE}|${MATRIX_NPM_TAG})
-              should_build=true
-              ;;
-            "win32")
-              [[ "${MATRIX_NPM_TAG}" == win32-* ]] && should_build=true
-              ;;
-            "linux")
-              [[ "${MATRIX_NPM_TAG}" == linux-* ]] && should_build=true
-              ;;
-            "darwin")
-              [[ "${MATRIX_NPM_TAG}" == darwin-* ]] && should_build=true
-              ;;
-          esac
+          for filter in ${PACKAGE_FILTER//,/ }; do
+            case "${filter}" in
+              ""|"all"|${MATRIX_PACKAGE}|${MATRIX_NPM_TAG})
+                should_build=true
+                ;;
+              "core")
+                case "${MATRIX_NPM_TAG}" in
+                  darwin-arm64|linux-x64|win32-x64)
+                    should_build=true
+                    ;;
+                esac
+                ;;
+              "win32")
+                [[ "${MATRIX_NPM_TAG}" == win32-* ]] && should_build=true
+                ;;
+              "linux")
+                [[ "${MATRIX_NPM_TAG}" == linux-* ]] && should_build=true
+                ;;
+              "darwin")
+                [[ "${MATRIX_NPM_TAG}" == darwin-* ]] && should_build=true
+                ;;
+            esac
+          done
           echo "SHOULD_BUILD=${should_build}" >> "$GITHUB_ENV"
           echo "Package filter ${PACKAGE_FILTER}; ${MATRIX_PACKAGE} build=${should_build}"
 
