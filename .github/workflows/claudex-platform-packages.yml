@@ -228,6 +228,31 @@ jobs:
           fi
           cargo build --target "${TARGET}" --release "${build_args[@]}"
 
+      - name: Build symbols archive and strip binaries
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'linux')
+        shell: bash
+        working-directory: codex-rs
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binaries=(claudex)
+          bash "${GITHUB_WORKSPACE}/.github/scripts/archive-release-symbols-and-strip-binaries.sh" \
+            --target "${TARGET}" \
+            --artifact-name "${PACKAGE}" \
+            --release-dir "target/${TARGET}/release" \
+            --archive-dir "symbols-dist/${PACKAGE}" \
+            --binaries "${binaries[*]}"
+
+      - name: Upload symbols archive
+        if: env.SHOULD_BUILD == 'true' && contains(matrix.target, 'linux')
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.package }}-symbols-${{ github.event.client_payload.version || inputs.version }}
+          path: codex-rs/symbols-dist/${{ matrix.package }}/*
+          if-no-files-found: error
+
       - name: Stage npm platform tarball
         if: env.SHOULD_BUILD == 'true'
         shell: bash
