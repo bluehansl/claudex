@@ -59,7 +59,9 @@ struct VersionInfo {
     dismissed_version: Option<String>,
 }
 
-const VERSION_FILENAME: &str = "version.json";
+// Keep Claudex's update cache separate from Codex's `version.json` because both
+// CLIs share CODEX_HOME by default.
+const VERSION_FILENAME: &str = "claudex-version.json";
 
 fn version_filepath(config: &Config) -> PathBuf {
     config.codex_home.join(VERSION_FILENAME).into_path_buf()

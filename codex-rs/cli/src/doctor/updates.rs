@@ -21,7 +21,9 @@ use super::doctor_managed_by_npm;
 use super::npm_global_root_check;
 use super::run_command;
 
-const VERSION_FILE_NAME: &str = "version.json";
+// Keep Claudex's update cache separate from Codex's `version.json` because both
+// CLIs share CODEX_HOME by default.
+const VERSION_FILE_NAME: &str = "claudex-version.json";
 const CLAUDEX_NPM_PACKAGE_URL: &str = "https://registry.npmjs.org/@bluehansl%2fclaudex";
 
 /// Builds the update-health row for the current installation.
@@ -214,5 +216,10 @@ mod tests {
             }),
             "manual or unknown"
         );
+    }
+
+    #[test]
+    fn update_cache_uses_claudex_specific_file() {
+        assert_eq!(VERSION_FILE_NAME, "claudex-version.json");
     }
 }
