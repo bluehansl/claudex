@@ -7,6 +7,7 @@
 
 mod apply_patch;
 mod apps;
+mod claude_team_protocol;
 mod client;
 mod client_common;
 mod realtime_context;
