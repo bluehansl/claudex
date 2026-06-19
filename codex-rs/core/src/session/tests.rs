@@ -1,5 +1,9 @@
 use super::turn_context::TurnEnvironment;
 use super::*;
+use crate::claude_team_protocol::ClaudeTeamBinding;
+use crate::claude_team_protocol::ClaudeTeamEnvelope;
+use crate::claude_team_protocol::read_inbox;
+use crate::claude_team_protocol::write_inbox_atomic;
 use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
@@ -9162,6 +9166,83 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+}
+
+#[tokio::test]
+async fn claude_team_inbox_mail_waits_for_next_turn_when_busy_after_answer_boundary() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    sess.input_queue
+        .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
+        .await;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = ClaudeTeamBinding::new(temp.path().join("team"), "worker", "pane-1");
+    let envelope = ClaudeTeamEnvelope::plain_message("lead", "busy teammate update");
+    let inbox_path = binding.self_inbox_path();
+    write_inbox_atomic(&inbox_path, std::slice::from_ref(&envelope)).expect("write inbox");
+
+    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding)
+        .await
+        .expect("process inbox");
+
+    assert_eq!(
+        read_inbox(&inbox_path).expect("read processed inbox"),
+        Vec::new()
+    );
+    assert!(
+        !sess.input_queue.has_pending_input(&sess.active_turn).await,
+        "Claude team inbox mail should stay buffered once the current turn emitted its answer"
+    );
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+
+    assert_eq!(
+        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        vec![TurnInput::ResponseItem(
+            envelope.to_teammate_response_item()
+        )],
+    );
+}
+
+#[tokio::test]
+async fn claude_team_inbox_mail_starts_turn_when_idle() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = ClaudeTeamBinding::new(temp.path().join("team"), "worker", "pane-1");
+    let inbox_path = binding.self_inbox_path();
+    write_inbox_atomic(
+        &inbox_path,
+        &[ClaudeTeamEnvelope::plain_message(
+            "lead",
+            "idle teammate update",
+        )],
+    )
+    .expect("write inbox");
+
+    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding)
+        .await
+        .expect("process inbox");
+
+    assert_eq!(
+        read_inbox(&inbox_path).expect("read processed inbox"),
+        Vec::new()
+    );
+    assert!(
+        sess.active_turn.lock().await.is_some(),
+        "Claude team inbox mail marked trigger_turn should wake an idle session"
+    );
+
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 }
 
 #[tokio::test]

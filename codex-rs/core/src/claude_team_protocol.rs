@@ -14,8 +14,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 const MESSAGE_TYPE: &str = "message";
-const SHUTDOWN_REQUEST_TYPE: &str = "shutdown_request";
-const SHUTDOWN_APPROVED_TYPE: &str = "shutdown_approved";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeTeamBinding {
@@ -94,6 +92,7 @@ impl ClaudeTeamBinding {
 }
 
 impl ClaudeTeamEnvelope {
+    #[cfg(test)]
     pub(crate) fn plain_message(from: impl Into<String>, text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -163,6 +162,7 @@ impl ClaudeTeamEnvelope {
         self.message_type == MESSAGE_TYPE && self.as_control_message().is_none()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_shutdown_request(&self) -> bool {
         matches!(
             self.as_control_message(),
@@ -222,6 +222,7 @@ fn timestamp_to_string(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+#[cfg(test)]
 fn summarize_message(text: &str) -> String {
     let mut words = text.split_whitespace().take(10).collect::<Vec<_>>();
     if words.is_empty() {
