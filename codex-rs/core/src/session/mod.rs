@@ -15,6 +15,7 @@ use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
 use crate::attestation::AttestationProvider;
 use crate::build_available_skills;
+use crate::claude_team_protocol::ClaudeTeamBinding;
 use crate::compact;
 use crate::config::ManagedFeatures;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
@@ -609,7 +610,7 @@ impl Codex {
             ),
             workspace_roots: config.workspace_roots.clone(),
             codex_home: config.codex_home.clone(),
-            claude_team_binding: None,
+            claude_team_binding: claude_team_binding_from_config(&config),
             thread_name: None,
             original_config_do_not_use: Arc::clone(&config),
             metrics_service_name,
@@ -845,6 +846,17 @@ fn get_service_tier(
         service_tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE
             || model_info.supports_service_tier(service_tier)
     })
+}
+
+fn claude_team_binding_from_config(config: &Config) -> Option<ClaudeTeamBinding> {
+    let team = config.claude_team.as_deref()?;
+    let agent = config.claude_team_agent.as_deref()?;
+    let pane_id = config.claude_team_pane_id.as_deref().unwrap_or(agent);
+    Some(ClaudeTeamBinding::new(
+        config.claude_config_dir.join("teams").join(team),
+        agent,
+        pane_id,
+    ))
 }
 
 fn session_permission_profile_state_from_config(

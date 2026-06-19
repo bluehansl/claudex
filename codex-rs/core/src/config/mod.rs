@@ -845,6 +845,18 @@ pub struct Config {
     /// overridden by the `CODEX_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
 
+    /// Optional Claude native team name used for local inbox interoperability.
+    pub claude_team: Option<String>,
+
+    /// Optional Claude native team member name for this session.
+    pub claude_team_agent: Option<String>,
+
+    /// Directory containing Claude Code state, honoring `CLAUDE_CONFIG_DIR`.
+    pub claude_config_dir: PathBuf,
+
+    /// Pane identifier reported in Claude team shutdown approval envelopes.
+    pub claude_team_pane_id: Option<String>,
+
     /// Directory where Codex stores the SQLite state DB.
     pub sqlite_home: PathBuf,
 
@@ -2260,6 +2272,31 @@ fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
     paths.retain(|path| seen.insert(path.clone()));
 }
 
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn resolve_claude_config_dir() -> std::io::Result<PathBuf> {
+    if let Some(value) = non_empty_env("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(value));
+    }
+    let mut path = dirs::home_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not find home directory for default CLAUDE_CONFIG_DIR",
+        )
+    })?;
+    path.push(".claude");
+    Ok(path)
+}
+
 /// Resolves the OSS provider from CLI override or global config.
 /// Returns `None` if no provider is configured at any level.
 pub fn resolve_oss_provider(
@@ -2641,6 +2678,17 @@ impl Config {
             workspace_roots: workspace_roots_override,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
+        let claude_team = cfg
+            .claude_team
+            .clone()
+            .or_else(|| non_empty_env("CLAUDE_TEAM"));
+        let claude_team_agent = cfg
+            .claude_team_agent
+            .clone()
+            .or_else(|| non_empty_env("CLAUDE_TEAM_AGENT"));
+        let claude_config_dir = resolve_claude_config_dir()?;
+        let claude_team_pane_id =
+            non_empty_env("TMUX_PANE").or_else(|| claude_team_agent.clone());
 
         if bypass_hook_trust {
             startup_warnings.push(
@@ -3506,6 +3554,10 @@ impl Config {
             agent_job_max_runtime_seconds,
             agent_interrupt_message_enabled,
             codex_home,
+            claude_team,
+            claude_team_agent,
+            claude_config_dir,
+            claude_team_pane_id,
             sqlite_home,
             log_dir,
             config_lock_export_dir: cfg

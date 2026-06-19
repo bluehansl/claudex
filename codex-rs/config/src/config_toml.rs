@@ -142,6 +142,14 @@ pub struct ConfigToml {
     /// Review model override used by the `/review` feature.
     pub review_model: Option<String>,
 
+    /// Claude native team name for local teammate inbox interoperability.
+    #[serde(default)]
+    pub claude_team: Option<String>,
+
+    /// Claude native team member name for this session.
+    #[serde(default)]
+    pub claude_team_agent: Option<String>,
+
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
 

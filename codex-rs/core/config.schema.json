@@ -4441,6 +4441,16 @@
       "description": "When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `true`.",
       "type": "boolean"
     },
+    "claude_team": {
+      "default": null,
+      "description": "Claude native team name for local teammate inbox interoperability.",
+      "type": "string"
+    },
+    "claude_team_agent": {
+      "default": null,
+      "description": "Claude native team member name for this session.",
+      "type": "string"
+    },
     "cli_auth_credentials_store": {
       "allOf": [
         {

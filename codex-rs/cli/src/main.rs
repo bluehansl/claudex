@@ -2372,6 +2372,8 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         approval_policy,
         web_search,
         prompt,
+        claude_team,
+        claude_team_agent,
         config_overrides,
         ..
     } = subcommand_cli;
@@ -2390,6 +2392,12 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+    }
+    if claude_team.is_some() {
+        interactive.claude_team = claude_team;
+    }
+    if claude_team_agent.is_some() {
+        interactive.claude_team_agent = claude_team_agent;
     }
 
     interactive
