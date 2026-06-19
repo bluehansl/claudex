@@ -1,6 +1,8 @@
+use super::claude_team_watcher;
 use super::input_queue::InputQueue;
 use super::*;
 use crate::agents_md::LoadedAgentsMd;
+use crate::claude_team_protocol::ClaudeTeamBinding;
 use crate::config::ConstraintError;
 use crate::skills::SkillError;
 use crate::state::ActiveTurn;
@@ -84,6 +86,7 @@ pub(crate) struct SessionConfiguration {
     pub(super) workspace_roots: Vec<AbsolutePathBuf>,
     /// Directory containing all Codex state for this session.
     pub(super) codex_home: AbsolutePathBuf,
+    pub(super) claude_team_binding: Option<ClaudeTeamBinding>,
     /// Optional user-facing name for the thread, updated during the session.
     pub(super) thread_name: Option<String>,
 
@@ -1074,6 +1077,9 @@ impl Session {
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
+            }
+            if let Some(binding) = session_configuration.claude_team_binding.clone() {
+                claude_team_watcher::spawn_claude_team_inbox_watcher(&sess, binding);
             }
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.

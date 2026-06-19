@@ -194,6 +194,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod claude_team_watcher;
 mod config_lock;
 mod handlers;
 mod inject;
@@ -608,6 +609,7 @@ impl Codex {
             ),
             workspace_roots: config.workspace_roots.clone(),
             codex_home: config.codex_home.clone(),
+            claude_team_binding: None,
             thread_name: None,
             original_config_do_not_use: Arc::clone(&config),
             metrics_service_name,

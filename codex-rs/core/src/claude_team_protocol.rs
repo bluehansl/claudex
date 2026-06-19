@@ -11,10 +11,18 @@ use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 
 const MESSAGE_TYPE: &str = "message";
 const SHUTDOWN_REQUEST_TYPE: &str = "shutdown_request";
 const SHUTDOWN_APPROVED_TYPE: &str = "shutdown_approved";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClaudeTeamBinding {
+    team_dir: PathBuf,
+    agent_id: String,
+    pane_id: String,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct ClaudeTeamEnvelope {
@@ -51,6 +59,38 @@ pub(crate) enum ClaudeTeamControlMessage {
         #[serde(rename = "backendType")]
         backend_type: String,
     },
+}
+
+impl ClaudeTeamBinding {
+    pub(crate) fn new(
+        team_dir: impl Into<PathBuf>,
+        agent_id: impl Into<String>,
+        pane_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            team_dir: team_dir.into(),
+            agent_id: agent_id.into(),
+            pane_id: pane_id.into(),
+        }
+    }
+
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub(crate) fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+
+    pub(crate) fn self_inbox_path(&self) -> PathBuf {
+        self.inbox_path_for_agent(&self.agent_id)
+    }
+
+    pub(crate) fn inbox_path_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.team_dir
+            .join("inboxes")
+            .join(format!("{agent_id}.json"))
+    }
 }
 
 impl ClaudeTeamEnvelope {

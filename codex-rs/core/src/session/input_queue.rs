@@ -24,10 +24,15 @@ pub(crate) struct TurnInputQueue {
     items: Vec<TurnInput>,
 }
 
+struct MailboxInput {
+    item: ResponseItem,
+    trigger_turn: bool,
+}
+
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     mailbox_tx: watch::Sender<()>,
-    mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    mailbox_pending_mails: Mutex<VecDeque<MailboxInput>>,
 }
 
 impl InputQueue {
@@ -51,10 +56,20 @@ impl InputQueue {
         &self,
         communication: InterAgentCommunication,
     ) {
+        let trigger_turn = communication.trigger_turn;
+        let item = ResponseItem::from(communication.to_response_input_item());
+        self.enqueue_mailbox_response_item(item, trigger_turn).await;
+    }
+
+    pub(crate) async fn enqueue_mailbox_response_item(
+        &self,
+        item: ResponseItem,
+        trigger_turn: bool,
+    ) {
         self.mailbox_pending_mails
             .lock()
             .await
-            .push_back(communication);
+            .push_back(MailboxInput { item, trigger_turn });
         self.mailbox_tx.send_replace(());
     }
 
@@ -75,7 +90,7 @@ impl InputQueue {
             .lock()
             .await
             .drain(..)
-            .map(|mail| ResponseItem::from(mail.to_response_input_item()))
+            .map(|mail| mail.item)
             .collect()
     }
 
