@@ -6752,7 +6752,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         .expect("ephemeral guardian review should receive a shutdown op");
 }
 
-async fn make_session_and_context_with_auth_and_config_and_rx<F>(
+pub(crate) async fn make_session_and_context_with_auth_and_config_and_rx<F>(
     auth: CodexAuth,
     dynamic_tools: Vec<DynamicToolSpec>,
     configure_config: F,
@@ -6835,7 +6835,7 @@ where
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), default_environments),
         workspace_roots: config.workspace_roots.clone(),
         codex_home: config.codex_home.clone(),
-        claude_team_binding: None,
+        claude_team_binding: claude_team_binding_from_config(&config),
         thread_name: None,
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,

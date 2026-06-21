@@ -1,11 +1,13 @@
 use super::*;
 use crate::LoadedAgentsMd;
 use crate::ThreadManager;
+use crate::claude_team_protocol::read_inbox;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
@@ -1226,6 +1228,49 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && !communication.trigger_turn
             )
     }));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_send_message_routes_to_claude_team_inbox_when_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let claude_config_dir = temp.path().join(".claude");
+    let (session, turn, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.claude_config_dir = claude_config_dir.clone();
+            config.claude_team = Some("team-a".to_string());
+            config.claude_team_agent = Some("claudex".to_string());
+        },
+    )
+    .await;
+
+    SendMessageHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "send_message",
+            function_payload(json!({
+                "target": "lead",
+                "message": "hello from claudex"
+            })),
+        ))
+        .await
+        .expect("send_message should append to Claude team inbox");
+
+    let inbox_path = claude_config_dir.join("teams/team-a/inboxes/lead.json");
+    let inbox = read_inbox(&inbox_path).expect("read Claude team inbox");
+    assert_eq!(inbox.len(), 1);
+    let envelope = &inbox[0];
+    assert_eq!(envelope.from, "claudex");
+    assert_eq!(envelope.text, "hello from claudex");
+    assert_eq!(envelope.summary.as_deref(), Some("hello from claudex"));
+    assert_eq!(envelope.message_type, "message");
+    assert!(!envelope.read);
+
+    let serialized = serde_json::to_value(envelope).expect("serialize envelope");
+    assert!(serialized.get("id").is_none());
+    assert!(serialized.get("color").is_none());
 }
 
 #[tokio::test]
