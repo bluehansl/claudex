@@ -4,6 +4,8 @@
 //! resulting `InterAgentCommunication` should wake the target immediately.
 
 use super::*;
+use crate::claude_team_protocol::ClaudeTeamEnvelope;
+use crate::claude_team_protocol::append_inbox;
 use crate::tools::context::FunctionToolOutput;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -69,6 +71,17 @@ pub(crate) async fn handle_message_string_tool(
         call_id,
         ..
     } = invocation;
+    if let Some(binding) = session.claude_team_binding().await {
+        append_inbox(
+            &binding.inbox_path_for_agent(&target),
+            ClaudeTeamEnvelope::plain_message(binding.agent_id(), message),
+        )
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to send message: {err:#}"))
+        })?;
+        return Ok(FunctionToolOutput::from_text(String::new(), Some(true)));
+    }
+
     let prompt = String::new();
     let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
     let receiver_agent = session

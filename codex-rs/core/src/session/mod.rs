@@ -2722,6 +2722,11 @@ impl Session {
         state.session_configuration.collaboration_mode.clone()
     }
 
+    pub(crate) async fn claude_team_binding(&self) -> Option<ClaudeTeamBinding> {
+        let state = self.state.lock().await;
+        state.session_configuration.claude_team_binding.clone()
+    }
+
     pub(crate) fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
         self.multi_agent_version.get().copied()
     }

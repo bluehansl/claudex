@@ -92,7 +92,6 @@ impl ClaudeTeamBinding {
 }
 
 impl ClaudeTeamEnvelope {
-    #[cfg(test)]
     pub(crate) fn plain_message(from: impl Into<String>, text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -222,7 +221,6 @@ fn timestamp_to_string(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-#[cfg(test)]
 fn summarize_message(text: &str) -> String {
     let mut words = text.split_whitespace().take(10).collect::<Vec<_>>();
     if words.is_empty() {
