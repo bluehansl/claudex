@@ -4676,7 +4676,6 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
     };
 
     let (tx_event, _rx_event) = async_channel::unbounded();
-    let (tx_sub, _rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
@@ -4692,7 +4691,6 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
-        tx_sub,
         agent_status_tx,
         InitialHistory::New,
         SessionSource::Exec,
@@ -5019,7 +5017,6 @@ async fn make_session_with_config_and_rx(
     };
 
     let (tx_event, rx_event) = async_channel::unbounded();
-    let (tx_sub, _rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
@@ -5036,7 +5033,6 @@ async fn make_session_with_config_and_rx(
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
-        tx_sub,
         agent_status_tx,
         InitialHistory::New,
         SessionSource::Exec,
@@ -5123,7 +5119,6 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     };
 
     let (tx_event, rx_event) = async_channel::unbounded();
-    let (tx_sub, _rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
@@ -5140,7 +5135,6 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         models_manager,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
-        tx_sub,
         agent_status_tx,
         initial_history,
         session_source,
@@ -9196,7 +9190,7 @@ async fn claude_team_inbox_mail_waits_for_next_turn_when_busy_after_answer_bound
     let inbox_path = binding.self_inbox_path();
     write_inbox_atomic(&inbox_path, std::slice::from_ref(&envelope)).expect("write inbox");
 
-    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding, None)
+    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding)
         .await
         .expect("process inbox");
 
@@ -9235,7 +9229,7 @@ async fn claude_team_inbox_mail_starts_turn_when_idle() {
     )
     .expect("write inbox");
 
-    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding, None)
+    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding)
         .await
         .expect("process inbox");
 
@@ -9252,7 +9246,7 @@ async fn claude_team_inbox_mail_starts_turn_when_idle() {
 }
 
 #[tokio::test]
-async fn claude_team_shutdown_request_approves_then_submits_shutdown() {
+async fn claude_team_shutdown_request_approves_then_requests_process_exit() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let binding = ClaudeTeamBinding::new(temp.path().join("team"), "worker", "pane-1");
@@ -9277,12 +9271,11 @@ async fn claude_team_shutdown_request_approves_then_submits_shutdown() {
         }],
     )
     .expect("write shutdown request");
-    let (tx_sub, rx_sub) = async_channel::bounded(1);
-
-    super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding, Some(&tx_sub))
+    let outcome = super::claude_team_watcher::process_claude_team_inbox_once(&sess, &binding)
         .await
         .expect("process inbox");
 
+    assert!(outcome.shutdown_approved);
     assert_eq!(
         read_inbox(&inbox_path).expect("read processed inbox"),
         Vec::new()
@@ -9302,8 +9295,6 @@ async fn claude_team_shutdown_request_approves_then_submits_shutdown() {
             backend_type: "tmux".to_string(),
         }
     );
-    let shutdown = rx_sub.recv().await.expect("shutdown submission");
-    assert_eq!(shutdown.op, Op::Shutdown);
 }
 
 #[tokio::test]

@@ -483,7 +483,6 @@ impl Session {
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
-        tx_sub: Sender<Submission>,
         agent_status: watch::Sender<AgentStatus>,
         initial_history: InitialHistory,
         session_source: SessionSource,
@@ -1080,11 +1079,7 @@ impl Session {
                 *guard = Arc::downgrade(&sess);
             }
             if let Some(binding) = session_configuration.claude_team_binding.clone() {
-                claude_team_watcher::spawn_claude_team_inbox_watcher(
-                    &sess,
-                    binding,
-                    tx_sub.clone(),
-                );
+                claude_team_watcher::spawn_claude_team_inbox_watcher(&sess, binding);
             }
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.

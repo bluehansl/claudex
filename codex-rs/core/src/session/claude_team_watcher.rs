@@ -7,27 +7,28 @@ use crate::claude_team_protocol::read_inbox;
 use crate::claude_team_protocol::write_inbox_atomic;
 use anyhow::Context;
 use anyhow::Result;
-use async_channel::Sender;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::Submission;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::path::Path;
+use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use tracing::debug;
+use tracing::info;
 use tracing::warn;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+const PROCESS_EXIT_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
-pub(super) fn spawn_claude_team_inbox_watcher(
-    session: &Arc<Session>,
-    binding: ClaudeTeamBinding,
-    tx_sub: Sender<Submission>,
-) {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ClaudeTeamInboxOutcome {
+    pub(super) shutdown_approved: bool,
+}
+
+pub(super) fn spawn_claude_team_inbox_watcher(session: &Arc<Session>, binding: ClaudeTeamBinding) {
     let session = Arc::downgrade(session);
     tokio::spawn(async move {
         let mut last_fingerprint = None;
@@ -38,10 +39,14 @@ pub(super) fn spawn_claude_team_inbox_watcher(
             let inbox_path = binding.self_inbox_path();
             match inbox_fingerprint(inbox_path.as_path()) {
                 Ok(fingerprint) if fingerprint != last_fingerprint => {
-                    if let Err(err) =
-                        process_claude_team_inbox_once(&session, &binding, Some(&tx_sub)).await
-                    {
-                        warn!("failed to process Claude team inbox: {err:#}");
+                    match process_claude_team_inbox_once(&session, &binding).await {
+                        Ok(outcome) if outcome.shutdown_approved => {
+                            exit_process_after_shutdown_approval(&session).await;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!("failed to process Claude team inbox: {err:#}");
+                        }
                     }
                     last_fingerprint =
                         inbox_fingerprint(inbox_path.as_path()).unwrap_or(fingerprint);
@@ -59,14 +64,14 @@ pub(super) fn spawn_claude_team_inbox_watcher(
 pub(super) async fn process_claude_team_inbox_once(
     session: &Arc<Session>,
     binding: &ClaudeTeamBinding,
-    tx_sub: Option<&Sender<Submission>>,
-) -> Result<()> {
+) -> Result<ClaudeTeamInboxOutcome> {
     let inbox_path = binding.self_inbox_path();
     let envelopes = read_inbox(&inbox_path)?;
     if envelopes.is_empty() {
-        return Ok(());
+        return Ok(ClaudeTeamInboxOutcome::default());
     }
 
+    let mut outcome = ClaudeTeamInboxOutcome::default();
     let mut remaining = Vec::new();
     for envelope in envelopes {
         if envelope.is_plain_message() {
@@ -80,7 +85,8 @@ pub(super) async fn process_claude_team_inbox_once(
             continue;
         }
 
-        if handle_shutdown_request(&envelope, binding, tx_sub).await? {
+        if handle_shutdown_request(&envelope, binding).await? {
+            outcome.shutdown_approved = true;
             continue;
         }
 
@@ -91,13 +97,12 @@ pub(super) async fn process_claude_team_inbox_once(
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         session.maybe_start_turn_for_pending_work().await;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 async fn handle_shutdown_request(
     envelope: &ClaudeTeamEnvelope,
     binding: &ClaudeTeamBinding,
-    tx_sub: Option<&Sender<Submission>>,
 ) -> Result<bool> {
     let Some(ClaudeTeamControlMessage::ShutdownRequest {
         request_id, from, ..
@@ -109,18 +114,30 @@ async fn handle_shutdown_request(
     let approval =
         ClaudeTeamEnvelope::shutdown_approved(binding.agent_id(), request_id, binding.pane_id())?;
     append_inbox(&binding.inbox_path_for_agent(&from), approval)?;
-    if let Some(tx_sub) = tx_sub {
-        tx_sub
-            .send(Submission {
-                id: uuid::Uuid::now_v7().to_string(),
-                op: Op::Shutdown,
-                client_user_message_id: None,
-                trace: None,
-            })
-            .await
-            .context("failed to submit Claude team shutdown")?;
-    }
     Ok(true)
+}
+
+async fn exit_process_after_shutdown_approval(session: &Arc<Session>) -> ! {
+    let sub_id = uuid::Uuid::now_v7().to_string();
+    match time::timeout(
+        PROCESS_EXIT_GRACE_PERIOD,
+        super::handlers::shutdown(session, sub_id),
+    )
+    .await
+    {
+        Ok(true) => {
+            info!("Claude team shutdown approved; exiting process after session shutdown");
+        }
+        Ok(false) => {
+            warn!("Claude team shutdown returned without completion; exiting process");
+        }
+        Err(_) => {
+            warn!(
+                "Claude team shutdown grace period elapsed; exiting process without waiting further"
+            );
+        }
+    }
+    process::exit(0);
 }
 
 fn inbox_fingerprint(path: &Path) -> Result<Option<u64>> {

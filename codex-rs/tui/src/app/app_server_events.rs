@@ -2,7 +2,6 @@
 
 use super::App;
 use super::AppRunControl;
-use super::ExitReason;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
@@ -66,10 +65,6 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) -> AppRunControl {
-        if self.claude_team_thread_shutdown_exits(&notification) {
-            return AppRunControl::Exit(ExitReason::UserRequested);
-        }
-
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -160,15 +155,6 @@ impl App {
         self.chat_widget
             .handle_server_notification(notification, /*replay_kind*/ None);
         AppRunControl::Continue
-    }
-
-    pub(super) fn claude_team_thread_shutdown_exits(
-        &self,
-        notification: &ServerNotification,
-    ) -> bool {
-        matches!(notification, ServerNotification::ThreadClosed(_))
-            && self.config.claude_team.is_some()
-            && self.config.claude_team_agent.is_some()
     }
 
     async fn handle_server_request_event(
