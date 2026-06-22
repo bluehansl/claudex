@@ -301,6 +301,10 @@ fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
     turn_context.multi_agent_version == MultiAgentVersion::V2
 }
 
+fn claude_team_binding_enabled(turn_context: &TurnContext) -> bool {
+    turn_context.config.claude_team.is_some() && turn_context.config.claude_team_agent.is_some()
+}
+
 fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
     match turn_context.multi_agent_version {
         MultiAgentVersion::Disabled => false,
@@ -777,6 +781,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             planned_tools.add_with_exposure(CloseAgentHandler, exposure);
         }
+    }
+
+    if !multi_agent_v2_enabled(turn_context) && claude_team_binding_enabled(turn_context) {
+        planned_tools.add(SendMessageHandlerV2);
     }
 
     if agent_jobs_tools_enabled(turn_context) {

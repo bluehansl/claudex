@@ -1068,6 +1068,32 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
 }
 
 #[tokio::test]
+async fn claude_team_binding_exposes_send_message_without_multi_agent_mode() {
+    let unbound = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+        update_config(turn, |config| {
+            config.claude_team = None;
+            config.claude_team_agent = None;
+        });
+    })
+    .await;
+    unbound.assert_visible_lacks(&["send_message"]);
+    unbound.assert_registered_lacks(&["send_message"]);
+
+    let bound = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+        update_config(turn, |config| {
+            config.claude_team = Some("team-a".to_string());
+            config.claude_team_agent = Some("claudex".to_string());
+        });
+    })
+    .await;
+    bound.assert_visible_contains(&["send_message"]);
+    bound.assert_registered_contains(&["send_message"]);
+    bound.assert_visible_lacks(&["spawn_agent", "followup_task", "wait_agent"]);
+}
+
+#[tokio::test]
 async fn tool_mode_selector_overrides_feature_flags() {
     let direct = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
