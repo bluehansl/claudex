@@ -156,6 +156,26 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
 }
 
 pub fn create_send_message_tool() -> ToolSpec {
+    create_send_message_tool_with_options(SendMessageToolOptions::Encrypted)
+}
+
+pub fn create_plain_text_send_message_tool() -> ToolSpec {
+    create_send_message_tool_with_options(SendMessageToolOptions::PlainText)
+}
+
+enum SendMessageToolOptions {
+    Encrypted,
+    PlainText,
+}
+
+fn create_send_message_tool_with_options(options: SendMessageToolOptions) -> ToolSpec {
+    let message_schema = JsonSchema::string(Some(
+        "Message text to queue on the target agent.".to_string(),
+    ));
+    let message_schema = match options {
+        SendMessageToolOptions::Encrypted => message_schema.with_encrypted(),
+        SendMessageToolOptions::PlainText => message_schema,
+    };
     let properties = BTreeMap::from([
         (
             "target".to_string(),
@@ -163,13 +183,7 @@ pub fn create_send_message_tool() -> ToolSpec {
                 "Relative or canonical task name to message (from spawn_agent).".to_string(),
             )),
         ),
-        (
-            "message".to_string(),
-            JsonSchema::string(Some(
-                "Message text to queue on the target agent.".to_string(),
-            ))
-            .with_encrypted(),
-        ),
+        ("message".to_string(), message_schema),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {

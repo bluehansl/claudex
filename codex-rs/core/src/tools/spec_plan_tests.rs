@@ -167,6 +167,23 @@ impl ToolPlanProbe {
             .get(name)
             .unwrap_or_else(|| panic!("expected registered tool `{name}`"))
     }
+
+    fn assert_send_message_uses_plaintext_message(&self) {
+        let ToolSpec::Function(tool) = self.visible_spec("send_message") else {
+            panic!("expected send_message function spec");
+        };
+        let properties = tool
+            .parameters
+            .properties
+            .as_ref()
+            .expect("send_message should use object params");
+        assert_eq!(
+            properties
+                .get("message")
+                .and_then(|schema| schema.encrypted),
+            None
+        );
+    }
 }
 
 async fn probe_with(
@@ -1068,7 +1085,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
 }
 
 #[tokio::test]
-async fn claude_team_binding_exposes_send_message_without_multi_agent_mode() {
+async fn claude_team_binding_exposes_plaintext_send_message_tool() {
     let unbound = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
         update_config(turn, |config| {
@@ -1091,6 +1108,18 @@ async fn claude_team_binding_exposes_send_message_without_multi_agent_mode() {
     bound.assert_visible_contains(&["send_message"]);
     bound.assert_registered_contains(&["send_message"]);
     bound.assert_visible_lacks(&["spawn_agent", "followup_task", "wait_agent"]);
+    bound.assert_send_message_uses_plaintext_message();
+
+    let bound_v2 = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.claude_team = Some("team-a".to_string());
+            config.claude_team_agent = Some("claudex".to_string());
+        });
+    })
+    .await;
+    bound_v2.assert_visible_contains(&["spawn_agent", "send_message", "followup_task"]);
+    bound_v2.assert_send_message_uses_plaintext_message();
 }
 
 #[tokio::test]

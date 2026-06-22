@@ -40,6 +40,7 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::PlainTextSendMessageHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -730,10 +731,12 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 ),
                 exposure,
             ));
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
-                exposure,
-            ));
+            let send_message_handler = if claude_team_binding_enabled(turn_context) {
+                multi_agent_v2_handler(PlainTextSendMessageHandler, tool_namespace)
+            } else {
+                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace)
+            };
+            planned_tools.add_arc(override_tool_exposure(send_message_handler, exposure));
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
                 exposure,
@@ -784,7 +787,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
     }
 
     if !multi_agent_v2_enabled(turn_context) && claude_team_binding_enabled(turn_context) {
-        planned_tools.add(SendMessageHandlerV2);
+        planned_tools.add(PlainTextSendMessageHandler);
     }
 
     if agent_jobs_tools_enabled(turn_context) {
