@@ -3756,6 +3756,42 @@ async fn active_non_primary_shutdown_target_still_switches_for_other_pending_exi
     Ok(())
 }
 
+#[tokio::test]
+async fn claude_team_active_thread_shutdown_exits_when_bound() {
+    let mut app = make_test_app().await;
+    let active_thread_id = ThreadId::new();
+    app.active_thread_id = Some(active_thread_id);
+    app.config.claude_team = Some("team".to_string());
+    app.config.claude_team_agent = Some("worker".to_string());
+
+    assert!(
+        app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
+            thread_closed_notification(active_thread_id)
+        ))
+    );
+}
+
+#[tokio::test]
+async fn claude_team_active_thread_shutdown_does_not_exit_unbound_or_other_thread() {
+    let mut app = make_test_app().await;
+    let active_thread_id = ThreadId::new();
+    app.active_thread_id = Some(active_thread_id);
+
+    assert!(
+        !app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
+            thread_closed_notification(active_thread_id)
+        ))
+    );
+
+    app.config.claude_team = Some("team".to_string());
+    app.config.claude_team_agent = Some("worker".to_string());
+    assert!(
+        !app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
+            thread_closed_notification(ThreadId::new())
+        ))
+    );
+}
+
 async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
     let mut app = make_test_app().await;
     app.config.cwd = test_path_buf("/tmp/project").abs();

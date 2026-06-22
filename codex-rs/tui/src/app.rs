@@ -1159,13 +1159,14 @@ See the Codex keymap documentation for supported actions and examples."
                         app.active_thread_rx.is_some()
                     ) => {
                         if let Some(event) = active {
-                            if let Err(err) = app.handle_active_thread_event(tui, &mut app_server, event).await {
-                                break Err(err);
+                            match app.handle_active_thread_event(tui, &mut app_server, event).await {
+                                Ok(control) => control,
+                                Err(err) => break Err(err),
                             }
                         } else {
                             app.clear_active_thread().await;
+                            AppRunControl::Continue
                         }
-                        AppRunControl::Continue
                     }
                     event = tui_events.next() => {
                         if let Some(event) = event {

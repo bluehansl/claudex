@@ -1442,7 +1442,7 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         event: ThreadBufferedEvent,
-    ) -> Result<()> {
+    ) -> Result<AppRunControl> {
         // Capture this before any potential thread switch: we only want to clear
         // the exit marker when the currently active thread acknowledges shutdown.
         let pending_shutdown_exit_completed = matches!(
@@ -1485,19 +1485,40 @@ impl App {
                     "Agent thread {closed_thread_id} closed. Failed to switch back to main thread {primary_thread_id}.",
                 ));
             }
-            return Ok(());
+            return Ok(AppRunControl::Continue);
         }
 
+        let claude_team_exit_completed = self.claude_team_active_thread_shutdown_exits(&event);
         if pending_shutdown_exit_completed {
             // Clear only after seeing the shutdown completion for the tracked
             // thread, so unrelated shutdowns cannot consume this marker.
             self.pending_shutdown_exit_thread_id = None;
         }
         self.handle_thread_event_now(event);
+        if claude_team_exit_completed {
+            return Ok(AppRunControl::Exit(ExitReason::UserRequested));
+        }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
         }
-        Ok(())
+        Ok(AppRunControl::Continue)
+    }
+
+    pub(super) fn claude_team_active_thread_shutdown_exits(
+        &self,
+        event: &ThreadBufferedEvent,
+    ) -> bool {
+        let ThreadBufferedEvent::Notification(ServerNotification::ThreadClosed(notification)) =
+            event
+        else {
+            return false;
+        };
+        self.config.claude_team.is_some()
+            && self.config.claude_team_agent.is_some()
+            && self
+                .active_thread_id
+                .as_ref()
+                .is_some_and(|thread_id| thread_id.to_string() == notification.thread_id)
     }
 }
 
