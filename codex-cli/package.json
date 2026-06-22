@@ -1,6 +1,6 @@
 {
   "name": "@bluehansl/claudex",
-  "version": "0.139.1",
+  "version": "0.139.2",
   "description": "Claudex CLI is a customized Codex CLI that runs locally on your computer.",
   "license": "Apache-2.0",
   "bin": {
