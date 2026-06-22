@@ -1185,9 +1185,9 @@ See the Codex keymap documentation for supported actions and examples."
                             None => {
                                 listen_for_app_server_events = false;
                                 tracing::warn!("app-server event stream closed");
+                                AppRunControl::Continue
                             }
                         }
-                        AppRunControl::Continue
                     }
                 };
                 if App::should_stop_waiting_for_initial_session(

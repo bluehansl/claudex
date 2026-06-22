@@ -1,6 +1,8 @@
 //! App-server event stream handling for the TUI app.
 
 use super::App;
+use super::AppRunControl;
+use super::ExitReason;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
@@ -31,7 +33,7 @@ impl App {
         &mut self,
         app_server_client: &AppServerSession,
         event: AppServerEvent,
-    ) {
+    ) -> AppRunControl {
         match event {
             AppServerEvent::Lagged { skipped } => {
                 tracing::warn!(
@@ -42,7 +44,8 @@ impl App {
                 self.chat_widget.finish_mcp_startup_after_lag();
             }
             AppServerEvent::ServerNotification(notification) => {
-                self.handle_server_notification_event(app_server_client, notification)
+                return self
+                    .handle_server_notification_event(app_server_client, notification)
                     .await;
             }
             AppServerEvent::ServerRequest(request) => {
@@ -55,13 +58,18 @@ impl App {
                 self.app_event_tx.send(AppEvent::FatalExitRequest(message));
             }
         }
+        AppRunControl::Continue
     }
 
     async fn handle_server_notification_event(
         &mut self,
         app_server_client: &AppServerSession,
         notification: ServerNotification,
-    ) {
+    ) -> AppRunControl {
+        if self.claude_team_thread_shutdown_exits(&notification) {
+            return AppRunControl::Exit(ExitReason::UserRequested);
+        }
+
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -77,7 +85,7 @@ impl App {
             ServerNotification::AccountRateLimitsUpdated(notification) => {
                 self.chat_widget
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotification::AccountUpdated(notification) => {
                 self.chat_widget.update_account_state(
@@ -90,7 +98,7 @@ impl App {
                         .auth_mode
                         .is_some_and(AuthMode::has_chatgpt_account),
                 );
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(_) => {
                 let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
@@ -103,7 +111,7 @@ impl App {
                 self.chat_widget.refresh_plugin_mentions();
                 self.chat_widget.submit_op(AppCommand::reload_user_config());
                 self.fetch_plugins_list(app_server_client, cwd);
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotification::AppListUpdated(notification) => {
                 self.chat_widget.on_connectors_loaded(
@@ -112,7 +120,7 @@ impl App {
                     }),
                     /*is_final*/ false,
                 );
-                return;
+                return AppRunControl::Continue;
             }
             _ => {}
         }
@@ -131,26 +139,36 @@ impl App {
                 if let Err(err) = result {
                     tracing::warn!("failed to enqueue app-server notification: {err}");
                 }
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotificationThreadTarget::InvalidThreadId(thread_id) => {
                 tracing::warn!(
                     thread_id,
                     "ignoring app-server notification with invalid thread_id"
                 );
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotificationThreadTarget::AppScoped => {
                 tracing::debug!(
                     "ignoring app-scoped MCP startup notification without a TUI app-level target"
                 );
-                return;
+                return AppRunControl::Continue;
             }
             ServerNotificationThreadTarget::Global => {}
         }
 
         self.chat_widget
             .handle_server_notification(notification, /*replay_kind*/ None);
+        AppRunControl::Continue
+    }
+
+    pub(super) fn claude_team_thread_shutdown_exits(
+        &self,
+        notification: &ServerNotification,
+    ) -> bool {
+        matches!(notification, ServerNotification::ThreadClosed(_))
+            && self.config.claude_team.is_some()
+            && self.config.claude_team_agent.is_some()
     }
 
     async fn handle_server_request_event(

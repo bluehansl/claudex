@@ -3757,39 +3757,46 @@ async fn active_non_primary_shutdown_target_still_switches_for_other_pending_exi
 }
 
 #[tokio::test]
-async fn claude_team_active_thread_shutdown_exits_when_bound() {
+async fn claude_team_thread_shutdown_exits_when_bound_without_active_thread_match() {
     let mut app = make_test_app().await;
     let active_thread_id = ThreadId::new();
     app.active_thread_id = Some(active_thread_id);
     app.config.claude_team = Some("team".to_string());
     app.config.claude_team_agent = Some("worker".to_string());
 
-    assert!(
-        app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
-            thread_closed_notification(active_thread_id)
-        ))
-    );
+    assert!(app.claude_team_thread_shutdown_exits(&thread_closed_notification(ThreadId::new())));
 }
 
 #[tokio::test]
-async fn claude_team_active_thread_shutdown_does_not_exit_unbound_or_other_thread() {
+async fn claude_team_thread_shutdown_does_not_exit_unbound() {
     let mut app = make_test_app().await;
     let active_thread_id = ThreadId::new();
     app.active_thread_id = Some(active_thread_id);
 
-    assert!(
-        !app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
-            thread_closed_notification(active_thread_id)
-        ))
-    );
+    assert!(!app.claude_team_thread_shutdown_exits(&thread_closed_notification(active_thread_id)));
+}
 
+#[tokio::test]
+async fn claude_team_thread_closed_notification_exits_before_thread_routing() {
+    let mut app = make_test_app().await;
     app.config.claude_team = Some("team".to_string());
     app.config.claude_team_agent = Some("worker".to_string());
-    assert!(
-        !app.claude_team_active_thread_shutdown_exits(&ThreadBufferedEvent::Notification(
-            thread_closed_notification(ThreadId::new())
-        ))
-    );
+    let active_thread_id = ThreadId::new();
+    app.active_thread_id = Some(active_thread_id);
+
+    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    let control = app
+        .handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerNotification(
+                thread_closed_notification(ThreadId::new()),
+            ),
+        )
+        .await;
+
+    assert_matches!(control, AppRunControl::Exit(ExitReason::UserRequested));
 }
 
 async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
