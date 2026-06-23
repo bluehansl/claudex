@@ -4854,6 +4854,16 @@
       },
       "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`."
     },
+    "claude_team": {
+      "default": null,
+      "description": "Optional Claude native team name used for teammate identity display and interop.",
+      "type": "string"
+    },
+    "claude_team_agent": {
+      "default": null,
+      "description": "Optional Claude native team member name for this session.",
+      "type": "string"
+    },
     "hooks": {
       "allOf": [
         {

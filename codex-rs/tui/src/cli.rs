@@ -71,6 +71,14 @@ pub struct Cli {
     #[arg(long = "no-alt-screen", default_value_t = false)]
     pub no_alt_screen: bool,
 
+    /// Internal: Claude native team name for teammate inbox interoperability.
+    #[arg(long = "claude-team", hide = true)]
+    pub claude_team: Option<String>,
+
+    /// Internal: Claude native team member name for this session.
+    #[arg(long = "claude-team-agent", hide = true)]
+    pub claude_team_agent: Option<String>,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }

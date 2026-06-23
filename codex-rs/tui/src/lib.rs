@@ -929,6 +929,18 @@ pub async fn run_main(
             .raw_overrides
             .push("web_search=\"live\"".to_string());
     }
+    if let Some(claude_team) = &cli.claude_team {
+        cli.config_overrides.raw_overrides.push(format!(
+            "claude_team={}",
+            toml::Value::String(claude_team.clone())
+        ));
+    }
+    if let Some(claude_team_agent) = &cli.claude_team_agent {
+        cli.config_overrides.raw_overrides.push(format!(
+            "claude_team_agent={}",
+            toml::Value::String(claude_team_agent.clone())
+        ));
+    }
 
     // When using `--oss`, let the bootstrapper pick the model (defaulting to
     // gpt-oss:20b) and ensure it is present locally. Also, force the built‑in
@@ -1765,6 +1777,8 @@ async fn run_ratatui_app(
         prompt,
         shared,
         no_alt_screen,
+        claude_team: _,
+        claude_team_agent: _,
         ..
     } = cli;
     let images = shared.into_inner().images;

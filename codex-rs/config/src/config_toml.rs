@@ -306,6 +306,12 @@ pub struct ConfigToml {
     #[serde(default = "default_history")]
     pub history: Option<History>,
 
+    /// Optional Claude native team name used for teammate identity display and interop.
+    pub claude_team: Option<String>,
+
+    /// Optional Claude native team member name for this session.
+    pub claude_team_agent: Option<String>,
+
     /// Directory where Codex stores the SQLite state DB.
     /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,

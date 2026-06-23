@@ -258,6 +258,16 @@ fn resolve_sqlite_home_env(resolved_cwd: &Path) -> Option<PathBuf> {
     }
 }
 
+fn non_empty_env(name: &str) -> Option<String> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn resolve_cli_auth_credentials_store_mode(
     configured: AuthCredentialsStoreMode,
     package_version: &str,
@@ -844,6 +854,12 @@ pub struct Config {
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
+
+    /// Optional Claude native team name used for teammate identity display and interop.
+    pub claude_team: Option<String>,
+
+    /// Optional Claude native team member name for this session.
+    pub claude_team_agent: Option<String>,
 
     /// Directory where Codex stores the SQLite state DB.
     pub sqlite_home: PathBuf,
@@ -3306,6 +3322,16 @@ impl Config {
             .map(AbsolutePathBuf::to_path_buf)
             .or_else(|| resolve_sqlite_home_env(&resolved_cwd))
             .unwrap_or_else(|| codex_home.to_path_buf());
+        let claude_team = cfg
+            .claude_team
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| non_empty_env("CLAUDE_TEAM"));
+        let claude_team_agent = cfg
+            .claude_team_agent
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| non_empty_env("CLAUDE_TEAM_AGENT"));
         let original_permission_profile = permission_profile.clone();
         apply_requirement_constrained_value(
             "approval_policy",
@@ -3506,6 +3532,8 @@ impl Config {
             agent_job_max_runtime_seconds,
             agent_interrupt_message_enabled,
             codex_home,
+            claude_team,
+            claude_team_agent,
             sqlite_home,
             log_dir,
             config_lock_export_dir: cfg
