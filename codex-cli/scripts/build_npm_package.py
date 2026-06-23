@@ -60,12 +60,10 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
 
 CORE_PLATFORM_PACKAGES: tuple[str, ...] = (
     "claudex-darwin-arm64",
-    "claudex-win32-x64",
-    "claudex-linux-x64",
 )
 
 PACKAGE_EXPANSIONS: dict[str, list[str]] = {
-    "claudex": ["claudex", *CODEX_PLATFORM_PACKAGES],
+    "claudex": ["claudex", *CORE_PLATFORM_PACKAGES],
 }
 
 PACKAGE_NATIVE_COMPONENTS: dict[str, list[str]] = {
@@ -134,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Platform optional dependencies to include in the root Claudex package. "
             "Use 'all', 'core', or a comma-separated list of npm tags/package names. "
-            "Core means darwin-arm64, win32-x64, and linux-x64."
+            "Core means darwin-arm64. Other platforms are built only on request."
         ),
     )
     return parser.parse_args()

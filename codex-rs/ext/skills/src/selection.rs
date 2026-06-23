@@ -10,6 +10,14 @@ use crate::catalog::SkillPackageId;
 
 const SKILL_PATH_PREFIX: &str = "skill://";
 
+#[tracing::instrument(
+    level = "trace",
+    skip_all,
+    fields(
+        input_count = inputs.len(),
+        catalog_entry_count = catalog.entries.len()
+    )
+)]
 pub(crate) fn collect_explicit_skill_mentions(
     inputs: &[UserInput],
     catalog: &SkillCatalog,
@@ -93,12 +101,12 @@ fn push_selected(
 }
 
 fn entry_matches_path(entry: &SkillCatalogEntry, path: &str) -> bool {
-    entry.main_prompt.0 == path
+    entry.main_prompt.as_str() == path
         || entry.id.0 == path
         || entry
             .display_path
             .as_deref()
-            .is_some_and(|display_path| display_path == path)
+            .is_some_and(|display_path| normalize_skill_path(display_path) == path)
 }
 
 fn path_is_skill(path: &str) -> bool {
