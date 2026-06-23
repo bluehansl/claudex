@@ -873,7 +873,7 @@ pub struct Config {
     /// overridden by the `CODEX_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
 
-    /// Optional Claude native team name used for local inbox interoperability.
+    /// Optional Claude native team name used for teammate identity display and interop.
     pub claude_team: Option<String>,
 
     /// Optional Claude native team member name for this session.
@@ -3019,10 +3019,12 @@ impl Config {
         let claude_team = cfg
             .claude_team
             .clone()
+            .filter(|value| !value.trim().is_empty())
             .or_else(|| non_empty_env("CLAUDE_TEAM"));
         let claude_team_agent = cfg
             .claude_team_agent
             .clone()
+            .filter(|value| !value.trim().is_empty())
             .or_else(|| non_empty_env("CLAUDE_TEAM_AGENT"));
         let claude_config_dir = resolve_claude_config_dir()?;
         let claude_team_pane_id =

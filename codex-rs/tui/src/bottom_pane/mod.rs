@@ -22,6 +22,7 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
+use crate::bottom_pane::teammate_identity::TeammateIdentity;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -144,6 +145,7 @@ pub(crate) mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
 mod selection_tabs;
+mod teammate_identity;
 mod textarea;
 mod unified_exec_footer;
 pub(crate) use feedback_view::FeedbackNoteView;
@@ -235,6 +237,8 @@ pub(crate) struct BottomPane {
     pending_input_preview: PendingInputPreview,
     /// Inactive threads with pending approval requests.
     pending_thread_approvals: PendingThreadApprovals,
+    /// Claude team binding identity shown directly above the composer.
+    teammate_identity: TeammateIdentity,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
     keymap: RuntimeKeymap,
@@ -290,6 +294,7 @@ impl BottomPane {
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_input_preview: PendingInputPreview::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
+            teammate_identity: TeammateIdentity::default(),
             esc_backtrack_hint: false,
             animations_enabled,
             context_window_percent: None,
@@ -435,6 +440,14 @@ impl BottomPane {
     pub(crate) fn set_side_conversation_active(&mut self, active: bool) {
         self.composer.set_side_conversation_active(active);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_teammate_identity(&mut self, team: Option<String>, agent: Option<String>) {
+        let identity = TeammateIdentity::new(team, agent);
+        if self.teammate_identity != identity {
+            self.teammate_identity = identity;
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn set_placeholder_text(&mut self, placeholder: String) {
@@ -1710,6 +1723,12 @@ impl BottomPane {
             }
             let mut flex2 = FlexRenderable::new();
             flex2.push(/*flex*/ 1, RenderableItem::Owned(flex.into()));
+            if !self.teammate_identity.is_empty() {
+                flex2.push(
+                    /*flex*/ 0,
+                    RenderableItem::Borrowed(&self.teammate_identity),
+                );
+            }
             let composer: RenderableItem<'_> = if composer_right_reserve == 0 {
                 RenderableItem::Borrowed(&self.composer)
             } else {

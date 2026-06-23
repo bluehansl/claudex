@@ -243,6 +243,10 @@ impl ChatWidget {
         };
 
         widget.prefetch_rate_limits();
+        widget.bottom_pane.set_teammate_identity(
+            widget.config.claude_team.clone(),
+            widget.config.claude_team_agent.clone(),
+        );
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);
         }
