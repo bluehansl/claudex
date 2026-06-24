@@ -121,6 +121,88 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: rustup target add "${TARGET}"
 
+      - name: Compute Cargo cache keys
+        if: env.SHOULD_BUILD == 'true'
+        id: cache_keys
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import hashlib
+          from pathlib import Path
+
+          for output, filename in (
+              ("lock_hash", "Cargo.lock"),
+              ("toolchain_hash", "rust-toolchain.toml"),
+          ):
+              data = Path(filename).read_bytes()
+              print(f"{output}={hashlib.sha256(data).hexdigest()}")
+          PY
+
+      - name: Restore Cargo home cache
+        if: env.SHOULD_BUILD == 'true'
+        id: cache_cargo_home_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ github.workspace }}/.cargo-home/bin/
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-release-${{ steps.cache_keys.outputs.lock_hash }}-${{ steps.cache_keys.outputs.toolchain_hash }}
+          restore-keys: |
+            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-release-
+
+      - name: Install sccache
+        if: env.SHOULD_BUILD == 'true'
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        if: env.SHOULD_BUILD == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+
+      - name: Enable sccache wrapper
+        if: env.SHOULD_BUILD == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$(command -v sccache)"
+          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+            wrapper="$(cygpath -w "${wrapper}")"
+          fi
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache (fallback)
+        if: env.SHOULD_BUILD == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        id: cache_sccache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ steps.cache_keys.outputs.lock_hash }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ steps.cache_keys.outputs.lock_hash }}-
+            sccache-${{ matrix.runner }}-${{ matrix.target }}-release-
+
       - name: Install Linux build dependencies
         if: env.SHOULD_BUILD == 'true' && runner.os == 'Linux'
         shell: bash
@@ -173,6 +255,7 @@ jobs:
           exec "\$1" "\${@:2}"
           EOF
           chmod +x "${wrapper}"
+          # This musl UBSan wrapper intentionally overrides sccache; darwin-arm64 is unaffected.
           echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
 
@@ -315,3 +398,44 @@ jobs:
           name: claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}
           path: dist/npm/claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}.tgz
           if-no-files-found: error
+
+      - name: Save Cargo home cache
+        if: always() && !cancelled() && env.SHOULD_BUILD == 'true' && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ github.workspace }}/.cargo-home/bin/
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-release-${{ steps.cache_keys.outputs.lock_hash }}-${{ steps.cache_keys.outputs.toolchain_hash }}
+
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.SHOULD_BUILD == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ steps.cache_keys.outputs.lock_hash }}-${{ github.run_id }}
+
+      - name: sccache stats
+        if: always() && env.SHOULD_BUILD == 'true'
+        continue-on-error: true
+        run: sccache --show-stats || true
+
+      - name: sccache summary
+        if: always() && env.SHOULD_BUILD == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### sccache stats — ${{ matrix.target }} (release)";
+            echo;
+            echo '```';
+            sccache --show-stats || true;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
