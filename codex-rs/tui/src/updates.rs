@@ -54,7 +54,9 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
 async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> anyhow::Result<()> {
     let (latest_version, package_info) = fetch_latest_npm_version().await?;
     match action {
-        Some(UpdateAction::NpmGlobalLatest) | Some(UpdateAction::BunGlobalLatest) => {
+        Some(UpdateAction::NpmGlobalLatest)
+        | Some(UpdateAction::BunGlobalLatest)
+        | Some(UpdateAction::PnpmGlobalLatest) => {
             npm_registry::ensure_version_ready(&package_info, &latest_version)?;
         }
         Some(UpdateAction::BrewUpgrade)

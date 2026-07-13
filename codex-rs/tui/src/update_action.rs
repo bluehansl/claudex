@@ -12,6 +12,8 @@ pub enum UpdateAction {
     NpmGlobalLatest,
     /// Update via `bun install -g @bluehansl/claudex@latest`.
     BunGlobalLatest,
+    /// Update via `pnpm add -g @bluehansl/claudex@latest`.
+    PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
     /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`.
@@ -26,6 +28,7 @@ impl UpdateAction {
         match &context.method {
             InstallMethod::Npm => Some(UpdateAction::NpmGlobalLatest),
             InstallMethod::Bun => Some(UpdateAction::BunGlobalLatest),
+            InstallMethod::Pnpm => Some(UpdateAction::PnpmGlobalLatest),
             InstallMethod::Brew | InstallMethod::Standalone { .. } | InstallMethod::Other => None,
         }
     }
@@ -35,6 +38,7 @@ impl UpdateAction {
         match self {
             UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@bluehansl/claudex"]),
             UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@bluehansl/claudex"]),
+            UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@bluehansl/claudex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => (
                 "sh",
@@ -100,6 +104,13 @@ mod tests {
                 package_layout: None,
             }),
             Some(UpdateAction::BunGlobalLatest)
+        );
+        assert_eq!(
+            UpdateAction::from_install_context(&InstallContext {
+                method: InstallMethod::Pnpm,
+                package_layout: None,
+            }),
+            Some(UpdateAction::PnpmGlobalLatest)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {

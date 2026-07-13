@@ -134,6 +134,7 @@ fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
         InstallMethod::Npm => "npm install -g @bluehansl/claudex",
         InstallMethod::Bun => "bun install -g @bluehansl/claudex",
+        InstallMethod::Pnpm => "pnpm add -g @bluehansl/claudex",
         InstallMethod::Brew | InstallMethod::Standalone { .. } => "manual or unknown",
         InstallMethod::Other => "manual or unknown",
     }
@@ -208,6 +209,13 @@ mod tests {
                 package_layout: None,
             }),
             "npm install -g @bluehansl/claudex"
+        );
+        assert_eq!(
+            update_action_label(&InstallContext {
+                method: InstallMethod::Pnpm,
+                package_layout: None,
+            }),
+            "pnpm add -g @bluehansl/claudex"
         );
         assert_eq!(
             update_action_label(&InstallContext {
