@@ -213,9 +213,10 @@ const requestManual = async (url, { cacheDir, method, timeoutMs }) => {
   });
 };
 
-const readHeaderSha = (response) => {
+const readHeaderSha = (response, { required = true } = {}) => {
   const value = response.headers.get(HASH_HEADER);
   if (!value || !/^[a-f0-9]{64}$/i.test(value)) {
+    if (!required) return null;
     throw new ManualFetchError(`Manual response is missing ${HASH_HEADER}.`);
   }
   return value.toLowerCase();
@@ -423,13 +424,15 @@ const fetchCodexManual = async ({
     method: "HEAD",
     timeoutMs,
   });
-  const expectedSha256 = readHeaderSha(headResponse);
+  const headHeaderSha256 = readHeaderSha(headResponse, { required: false });
   const manualPath = cacheFilePath(resolvedCacheDir);
   const outlinePath = outlineFilePath(resolvedCacheDir);
   const checkedAt = new Date().toISOString();
 
-  const cachedManual = await readCachedManual(resolvedCacheDir, expectedSha256);
-  if (cachedManual !== null) {
+  const cachedManual = headHeaderSha256
+    ? await readCachedManual(resolvedCacheDir, headHeaderSha256)
+    : null;
+  if (cachedManual !== null && headHeaderSha256) {
     const outline = buildOutline(cachedManual);
     const outlineText = outlineMarkdown(outline);
     await writeOutline(resolvedCacheDir, outlineText);
@@ -438,8 +441,8 @@ const fetchCodexManual = async ({
       outlineText,
       status: {
         manualUrl,
-        headerSha256: expectedSha256,
-        fetchedManualSha256: expectedSha256,
+        headerSha256: headHeaderSha256,
+        fetchedManualSha256: headHeaderSha256,
         manualHashMatches: true,
         cacheStatus: "hit",
         cacheDir: resolvedCacheDir,
@@ -457,8 +460,12 @@ const fetchCodexManual = async ({
     method: "GET",
     timeoutMs,
   });
-  const getHeaderSha256 = readHeaderSha(getResponse);
-  if (getHeaderSha256 !== expectedSha256) {
+  const getHeaderSha256 = readHeaderSha(getResponse, { required: false });
+  if (
+    headHeaderSha256 &&
+    getHeaderSha256 &&
+    getHeaderSha256 !== headHeaderSha256
+  ) {
     throw new ManualFetchError(
       `${HASH_HEADER} changed between HEAD and GET for ${manualUrl}.`
     );
@@ -466,6 +473,7 @@ const fetchCodexManual = async ({
 
   const manualText = await getResponse.text();
   const actualSha256 = sha256(manualText);
+  const expectedSha256 = getHeaderSha256 ?? headHeaderSha256 ?? actualSha256;
   const manualHashMatches = actualSha256 === expectedSha256;
   if (!manualHashMatches) {
     throw new ManualFetchError(
@@ -473,7 +481,13 @@ const fetchCodexManual = async ({
     );
   }
 
-  await writeCachedManual(resolvedCacheDir, manualText);
+  const cacheStatus =
+    (await readCachedManual(resolvedCacheDir, actualSha256)) === null
+      ? "updated"
+      : "hit";
+  if (cacheStatus === "updated") {
+    await writeCachedManual(resolvedCacheDir, manualText);
+  }
   const outline = buildOutline(manualText);
   const outlineText = outlineMarkdown(outline);
   await writeOutline(resolvedCacheDir, outlineText);
@@ -482,10 +496,10 @@ const fetchCodexManual = async ({
     outlineText,
     status: {
       manualUrl,
-      headerSha256: expectedSha256,
+      headerSha256: getHeaderSha256 ?? headHeaderSha256,
       fetchedManualSha256: actualSha256,
       manualHashMatches,
-      cacheStatus: "updated",
+      cacheStatus,
       cacheDir: resolvedCacheDir,
       manualPath,
       outlinePath,
