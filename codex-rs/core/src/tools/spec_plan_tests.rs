@@ -44,6 +44,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE: &str = "claude_team";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -1422,13 +1423,32 @@ async fn claude_team_binding_exposes_plaintext_send_message_tool() {
     .await;
     assert!(
         bound_v2
-            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .namespace_function_names(CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE)
             .iter()
             .any(|name| name == "send_message"),
-        "expected send_message in {MULTI_AGENT_V2_NAMESPACE} namespace: {:?}",
+        "expected send_message in {CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE} namespace: {:?}",
         bound_v2.namespace_functions
     );
-    bound_v2.assert_namespaced_send_message_uses_plaintext_message(MULTI_AGENT_V2_NAMESPACE);
+    assert!(
+        bound_v2
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .is_empty(),
+        "Claude Team must not override the reserved {MULTI_AGENT_V2_NAMESPACE}.send_message schema"
+    );
+    bound_v2.assert_namespaced_send_message_uses_plaintext_message(
+        CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE,
+    );
+
+    let bound_v2_with_custom_namespace = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.claude_team = Some("team-a".to_string());
+            config.claude_team_agent = Some("claudex".to_string());
+            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+        });
+    })
+    .await;
+    bound_v2_with_custom_namespace.assert_namespaced_send_message_uses_plaintext_message("agents");
 }
 
 #[tokio::test]

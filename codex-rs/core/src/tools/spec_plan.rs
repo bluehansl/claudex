@@ -91,6 +91,7 @@ use tracing::instrument;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE: &str = "claude_team";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -784,7 +785,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 ToolExposure::Direct
             };
             let tool_namespace = namespace_tools_enabled(turn_context)
-                .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
+                .then(|| multi_agent_v2_tool_namespace(turn_context))
                 .flatten();
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -862,6 +863,18 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
     }
     if !multi_agent_v2_enabled(turn_context) && claude_team_binding_enabled(turn_context) {
         planned_tools.add(PlainTextSendMessageHandler);
+    }
+}
+
+fn multi_agent_v2_tool_namespace(turn_context: &TurnContext) -> Option<&str> {
+    let configured_namespace = turn_context.config.multi_agent_v2.tool_namespace.as_deref();
+    if claude_team_binding_enabled(turn_context) && configured_namespace == Some("collaboration") {
+        // GPT-5.6 reserves `collaboration.send_message` and requires the exact upstream encrypted
+        // schema. Claude Team routing needs a plaintext message, so isolate the bridge under a
+        // non-reserved namespace while leaving ordinary Codex multi-agent tools unchanged.
+        Some(CLAUDE_TEAM_MULTI_AGENT_V2_NAMESPACE)
+    } else {
+        configured_namespace
     }
 }
 
