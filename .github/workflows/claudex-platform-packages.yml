@@ -56,6 +56,7 @@ jobs:
             runner: windows-11-arm
 
     env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CARGO_PROFILE_RELEASE_LTO: thin
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
