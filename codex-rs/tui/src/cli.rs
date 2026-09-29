@@ -1,6 +1,7 @@
 use clap::Args;
 use clap::FromArgMatches;
 use clap::Parser;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::ApprovalModeCliArg;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
@@ -8,6 +9,10 @@ use codex_utils_cli::SharedCliOptions;
 #[derive(Parser, Clone, Debug)]
 #[command(version)]
 pub struct Cli {
+    /// Internal: launching CLI that handles daemon updates after the TUI exits.
+    #[clap(skip)]
+    pub daemon_cli_executable: Option<AbsolutePathBuf>,
+
     /// Optional user prompt to start the session.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
@@ -82,6 +87,13 @@ pub struct Cli {
     /// Internal: Claude native team member name for this session.
     #[arg(long = "claude-team-agent", hide = true)]
     pub claude_team_agent: Option<String>,
+
+    /// Enable Claude Code cross-session messaging under this name.
+    #[arg(long = "claude-peer", value_name = "NAME")]
+    pub claude_peer_name: Option<String>,
+    /// Run without the shared background server, even if it is already running.
+    #[arg(long)]
+    pub no_daemon: bool,
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,

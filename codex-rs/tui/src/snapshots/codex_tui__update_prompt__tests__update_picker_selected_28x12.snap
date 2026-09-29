@@ -1,0 +1,15 @@
+---
+source: tui/src/update_prompt.rs
+expression: rendered
+---
+
+  Update available ·
+  0.159.0 → 9.9.9
+  Release notes:
+  https://www.npmjs.com/pa
+  ckage/@bluehansl/claudex
+↑
+› 3. Skip until next version
+
+  enter continue · esc
+  skip

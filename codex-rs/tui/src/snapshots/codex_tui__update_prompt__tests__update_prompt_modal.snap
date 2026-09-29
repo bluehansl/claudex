@@ -2,12 +2,12 @@
 source: tui/src/update_prompt.rs
 expression: terminal.backend()
 ---
-  ✨ Update available! 0.0.0 -> 9.9.9
 
+  Update available · 0.159.0 → 9.9.9
   Release notes: https://www.npmjs.com/package/@bluehansl/claudex
 
 › 1. Update now (runs `npm install -g @bluehansl/claudex`)                      
   2. Skip
   3. Skip until next version
 
-  Press enter to continue
+  enter continue · esc skip
