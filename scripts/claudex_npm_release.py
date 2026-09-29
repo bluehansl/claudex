@@ -309,6 +309,14 @@ def wait_for_integrity(path: Path, version: str) -> None:
     )
 
 
+def require_unpublished(version: str) -> None:
+    for candidate in (version, f"{version}-{TAG}"):
+        if npm_view(f"{PACKAGE}@{candidate}", "version") is not None:
+            raise ValueError(
+                f"{candidate}은 이미 게시됐습니다. 새 버전을 선택하거나 기존 run의 실패한 publish job만 재실행하세요."
+            )
+
+
 def publish_one(path: Path, version: str, tag: str) -> None:
     existing = npm_view(f"{PACKAGE}@{version}", "dist.integrity")
     if existing is not None:
@@ -367,6 +375,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path)
     parser.add_argument("--platform", type=Path)
     parser.add_argument("--check-inputs", action="store_true")
+    parser.add_argument("--require-unpublished", action="store_true")
     parser.add_argument("--package-filter", default=TAG)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--publish", action="store_true")
@@ -380,6 +389,8 @@ def main() -> int:
             os.environ.get("GITHUB_REF", ""),
             os.environ.get("GITHUB_REPOSITORY", ""),
         )
+    if args.require_unpublished:
+        require_unpublished(args.version)
     if args.root or args.platform or args.publish or args.smoke:
         if not args.root or not args.platform:
             parser.error("--root와 --platform이 모두 필요합니다.")

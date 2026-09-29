@@ -101,18 +101,21 @@ jobs:
         with:
           python-version: "3.x"
 
+      - uses: actions/setup-node@v6
+        if: env.SHOULD_BUILD == 'true'
+        with:
+          node-version: 24
+
       - name: Validate publish inputs before compiling
         if: env.SHOULD_BUILD == 'true' && github.event_name == 'workflow_dispatch' && inputs.publish
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
           PACKAGE_FILTER: ${{ inputs.packages }}
-        run: python3 scripts/claudex_npm_release.py --version "${VERSION}" --package-filter "${PACKAGE_FILTER}" --check-inputs
-
-      - uses: actions/setup-node@v6
-        if: env.SHOULD_BUILD == 'true'
-        with:
-          node-version: 24
+        run: |
+          set -euo pipefail
+          python3 scripts/claudex_npm_release.py --version "${VERSION}" --package-filter "${PACKAGE_FILTER}" --check-inputs --require-unpublished
+          python3 -m unittest discover -s scripts -p test_claudex_npm_release.py
 
       - uses: dtolnay/rust-toolchain@stable
         if: env.SHOULD_BUILD == 'true'

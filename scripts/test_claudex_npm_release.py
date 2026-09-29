@@ -66,6 +66,23 @@ class ReleaseTests(unittest.TestCase):
         release.inspect_tarball(self.tarball(), "1.2.3", native=False)
         release.inspect_tarball(self.tarball(native=True), "1.2.3", native=True)
 
+    def test_mock_harness_loads_with_standard_library_only(self):
+        directory = str(release.REPO_ROOT / "sdk/python/tests")
+        subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                f"import sys; sys.path.insert(0, {directory!r}); "
+                "from app_server_harness import MockResponsesServer, ev_completed, ev_response_created, sse; "
+                "assert all(callable(value) for value in (MockResponsesServer, ev_completed, ev_response_created, sse))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
     def test_rejects_wrong_package_version_repository_and_dependency(self):
         for change in [
             {"name": "@openai/codex"},
@@ -243,6 +260,14 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.wait_for_integrity(self.tarball(), "1.2.3")
             sleep.assert_not_called()
+
+    def test_prebuild_gate_rejects_root_or_platform_already_published(self):
+        for response in (["1.2.3"], [None, "1.2.3-darwin-arm64"]):
+            with patch.object(release, "npm_view", side_effect=response):
+                with self.assertRaises(ValueError):
+                    release.require_unpublished("1.2.3")
+        with patch.object(release, "npm_view", side_effect=[None, None]):
+            release.require_unpublished("1.2.3")
 
 
 if __name__ == "__main__":
