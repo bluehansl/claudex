@@ -4,29 +4,25 @@ on:
   repository_dispatch:
     types:
       - claudex-platform-packages
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/claudex-platform-packages.yml"
-      - ".github/actions/setup-rusty-v8/**"
-      - ".github/scripts/install-musl-build-tools.sh"
-      - "codex-cli/**"
-      - "codex-rs/**"
-      - "scripts/**"
   workflow_dispatch:
     inputs:
       version:
         description: "npm release version"
         required: true
-        default: "0.1.0"
       packages:
         description: "Package filter: core, all, win32, linux, darwin, npm tags, package names, or a comma-separated list"
         required: false
         default: "core"
+      publish:
+        description: "Verify and publish darwin-arm64/root packages through npm OIDC"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   package:
+    permissions:
+      contents: read
     name: ${{ matrix.package }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
@@ -104,6 +100,14 @@ jobs:
         if: env.SHOULD_BUILD == 'true'
         with:
           python-version: "3.x"
+
+      - name: Validate publish inputs before compiling
+        if: env.SHOULD_BUILD == 'true' && github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          PACKAGE_FILTER: ${{ inputs.packages }}
+        run: python3 scripts/claudex_npm_release.py --version "${VERSION}" --package-filter "${PACKAGE_FILTER}" --check-inputs
 
       - uses: actions/setup-node@v6
         if: env.SHOULD_BUILD == 'true'
@@ -357,6 +361,7 @@ jobs:
           PY
             )"
           fi
+          echo "CLAUDEX_PACKAGE_VERSION=${VERSION}" >> "$GITHUB_ENV"
           vendor_root="${GITHUB_WORKSPACE}/.claudex-vendor"
           package_dir="${vendor_root}/vendor/${TARGET}"
           stage_dir="${GITHUB_WORKSPACE}/.claudex-stage-${PACKAGE}"
@@ -399,8 +404,8 @@ jobs:
         if: env.SHOULD_BUILD == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}
-          path: dist/npm/claudex-npm-${{ matrix.npm_tag }}-${{ inputs.version }}.tgz
+          name: claudex-npm-${{ matrix.npm_tag }}-${{ env.CLAUDEX_PACKAGE_VERSION }}
+          path: dist/npm/claudex-npm-${{ matrix.npm_tag }}-${{ env.CLAUDEX_PACKAGE_VERSION }}.tgz
           if-no-files-found: error
 
       - name: Save Cargo home cache
@@ -442,4 +447,86 @@ jobs:
             echo '```';
             sccache --show-stats || true;
             echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Verify and publish npm
+    needs: package
+    if: github.repository == 'bluehansl/claudex' && github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: claudex-npm-publish
+      cancel-in-progress: false
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      VERSION: ${{ inputs.version }}
+      PACKAGE_FILTER: ${{ inputs.packages }}
+      ROOT_TARBALL: dist/npm-root-${{ inputs.version }}/bluehansl-claudex-${{ inputs.version }}.tgz
+      PLATFORM_TARBALL: dist/ci-npm/claudex-npm-darwin-arm64-${{ inputs.version }}.tgz
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Use npm with trusted publishing support
+        run: npm install --global npm@11.15.0
+
+      - name: Validate release identity and verification code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/claudex_npm_release.py --version "${VERSION}" --package-filter "${PACKAGE_FILTER}" --check-inputs
+          python3 -m unittest discover -s scripts -p test_claudex_npm_release.py
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: claudex-npm-darwin-arm64-${{ inputs.version }}
+          path: dist/ci-npm
+
+      - name: Build matching root package from the same commit
+        shell: bash
+        run: |
+          python3 codex-cli/scripts/build_npm_package.py --package claudex --release-version "${VERSION}" --pack-output "${ROOT_TARBALL}"
+
+      - name: Verify packages and run isolated code-mode smoke
+        shell: bash
+        run: |
+          python3 scripts/claudex_npm_release.py --version "${VERSION}" --root "${ROOT_TARBALL}" --platform "${PLATFORM_TARBALL}" --smoke
+
+      - name: Publish platform before root using npm OIDC
+        shell: bash
+        run: |
+          python3 scripts/claudex_npm_release.py --version "${VERSION}" --package-filter "${PACKAGE_FILTER}" --root "${ROOT_TARBALL}" --platform "${PLATFORM_TARBALL}" --publish
+
+      - name: Verify exact and latest installations in temporary prefixes
+        shell: bash
+        run: python3 scripts/claudex_npm_release.py --version "${VERSION}" --verify-install
+
+      - name: Release summary
+        if: always()
+        shell: bash
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          {
+            echo "### Claudex npm release"
+            echo "- Version: ${VERSION}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Platform: darwin-arm64"
+            echo "- Publish/verification job: ${RESULT}"
           } >> "$GITHUB_STEP_SUMMARY"

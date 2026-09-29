@@ -9,9 +9,10 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from openai_codex import CodexConfig
+if TYPE_CHECKING:
+    from openai_codex import CodexConfig
 
 Json = dict[str, Any]
 
@@ -228,6 +229,8 @@ class AppServerHarness:
 
     def app_server_config(self) -> CodexConfig:
         """Prefer the CI binary, then a local debug build, then the installed runtime."""
+        from openai_codex import CodexConfig
+
         binary_name = "codex.exe" if os.name == "nt" else "codex"
         debug_binary = Path(__file__).resolve().parents[3] / "codex-rs/target/debug" / binary_name
         codex_bin = os.environ.get("CODEX_EXEC_PATH")
