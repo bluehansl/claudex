@@ -1,81 +1,55 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Claudex
 
----
+OpenAI Codex를 기반으로 한 비공식 커스텀 CLI입니다. npm 패키지와 실행 명령은 원본 Codex와 분리되어 있습니다.
 
-## Quickstart
+## 설치와 실행
 
-### Installing and running Codex CLI
-
-Run the following on Mac or Linux to install Codex CLI:
+Node.js 환경에서 다음 명령으로 설치합니다. Rust/Cargo는 필요하지 않습니다.
 
 ```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+npm install -g @bluehansl/claudex
+claudex
 ```
 
-Run the following on Windows to install Codex CLI:
+현재 기본 배포 대상은 **macOS Apple Silicon (arm64, M1 이후)** 입니다.
+다른 운영체제 패키지는 별도 요청 시 추가합니다.
+
+## 업데이트
 
 ```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+npm install -g @bluehansl/claudex@latest
+claudex --version
 ```
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+특정 버전은 `npm install -g @bluehansl/claudex@<version>`으로 설치합니다.
+업데이트 확인은 원본 `@openai/codex`가 아닌 `@bluehansl/claudex`를 기준으로 합니다.
+
+## Claude 세션 연결
+
+Claude Code 독립 세션과 통신할 때는 peer 이름을 지정합니다.
 
 ```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
+claudex --claude-peer my-claudex
+claudex peer list
 ```
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
+Claude Team 연결은 별도의 `--claude-team`, `--claude-team-agent` 옵션을 사용합니다.
+peer 메시징과 Team inbox는 다른 프로토콜이며, 해당 세션은 공유 daemon 대신 로컬 프로세스로 실행됩니다.
 
-Codex CLI can also be installed via the following package managers:
+## 개발과 배포
 
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
+배포 workflow는 GitHub Actions에서 macOS ARM 패키지를 빌드하고,
+검증 후 npm 플랫폼 패키지와 루트 패키지를 순서대로 게시할 수 있습니다.
+일반 push는 배포를 실행하지 않으며, 수동 실행의 `publish=true`가 필요합니다.
 
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
+배포자용 설정, npm Trusted Publisher 등록 및 재시도 절차:
+[npm 배포 안내](codex-cli/scripts/README.md).
 
-Then simply run `codex` to get started.
+## Upstream
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+- [OpenAI Codex 원본 저장소](https://github.com/openai/codex)
+- [Codex 공식 사용 문서](https://developers.openai.com/codex)
+- [소스 빌드 안내](docs/install.md)
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+원본 Codex의 standalone/Homebrew 설치 명령은 Claudex 설치 명령이 아닙니다.
+이 저장소는 [Apache-2.0](LICENSE) 라이선스를 따릅니다.
