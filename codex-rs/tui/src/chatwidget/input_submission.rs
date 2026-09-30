@@ -393,6 +393,8 @@ impl ChatWidget {
             }
         }
 
+        crate::peer_mentions::apply_peer_references(&mut items, &mention_bindings);
+
         let effective_mode = self.effective_collaboration_mode();
         if effective_mode.model().trim().is_empty() {
             self.add_error_message(

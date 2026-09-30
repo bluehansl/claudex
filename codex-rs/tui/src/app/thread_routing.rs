@@ -79,14 +79,6 @@ impl App {
     }
 
     pub(super) async fn set_thread_active(&mut self, thread_id: ThreadId, active: bool) {
-        #[cfg(unix)]
-        if active
-            && self.primary_thread_id == Some(thread_id)
-            && let Err(error) = codex_app_server_client::activate_local_claude_peer(thread_id).await
-        {
-            self.chat_widget
-                .add_error_message(format!("Claude peer activation failed: {error}"));
-        }
         if let Some(channel) = self.thread_event_channels.get_mut(&thread_id) {
             let mut store = channel.store.lock().await;
             store.active = active;

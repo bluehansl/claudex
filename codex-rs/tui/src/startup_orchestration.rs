@@ -22,11 +22,15 @@ pub(super) async fn run_main_inner(
         cli.no_daemon = true;
     }
     if let Some(name) = &cli.claude_peer_name {
-        cli.no_daemon = true;
         cli.config_overrides.raw_overrides.push(format!(
             "claude_peer_name={}",
             toml::Value::String(name.clone())
         ));
+    }
+    if cli.no_claude_peer {
+        cli.config_overrides
+            .raw_overrides
+            .push("claude_peer_name=\"\"".into());
     }
     if cli.claude_peer_name.is_some() && cli.agents_overview {
         return Err(std::io::Error::other(
@@ -309,8 +313,7 @@ pub(super) async fn run_main_inner(
         config_cwd,
         mut screen,
     } = presentation;
-    if bootstrap_config.config_toml.claude_peer_name.is_some()
-        || bootstrap_config.config_toml.claude_team.is_some()
+    if bootstrap_config.config_toml.claude_team.is_some()
         || bootstrap_config.config_toml.claude_team_agent.is_some()
     {
         if explicit_remote_endpoint.is_some() || cli.agents_overview {

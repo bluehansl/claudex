@@ -165,13 +165,6 @@ impl PreparedTurnInputSettings {
                             let permitted = kind.permits_settings(current, proposed);
                             #[cfg(unix)]
                             if turn_trigger.as_deref() == Some("claude_peer") {
-                                let Some(runtime) = session
-                                    .services
-                                    .thread_extension_data
-                                    .get::<crate::claude_peer::PeerRuntime>()
-                                else {
-                                    return false;
-                                };
                                 return permitted
                                     && !session.is_interrupted()
                                     && [current, proposed].iter().all(|configuration| {
@@ -186,7 +179,16 @@ impl PreparedTurnInputSettings {
                                             } else {
                                                 codex_claude_peer::PermissionMode::Prompting
                                             };
-                                        runtime.permits_mode(mode)
+                                        session
+                                            .services
+                                            .thread_extension_data
+                                            .get::<crate::claude_peer::PeerRuntime>()
+                                            .is_some_and(|runtime| runtime.permits_mode(mode))
+                                            || session
+                                                .services
+                                                .thread_extension_data
+                                                .get::<crate::claude_peer::FrontendPeerRuntime>()
+                                                .is_some_and(|runtime| runtime.permits_mode(mode))
                                     });
                             }
                             permitted

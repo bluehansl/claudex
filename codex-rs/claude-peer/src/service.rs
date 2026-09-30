@@ -9,6 +9,7 @@ use crate::registry::PeerIdentity;
 use crate::registry::Registration;
 use crate::store::Inbox;
 use crate::transport;
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use serde_json::Value;
@@ -17,6 +18,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +29,26 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+static LIVE_PEERS: std::sync::OnceLock<std::sync::Mutex<Vec<std::sync::Weak<Peer>>>> =
+    std::sync::OnceLock::new();
+
+/// NTP의 직접 process::exit 경로에서도 이 프로세스가 만든 등록만 먼저 정리한다.
+pub async fn shutdown_owned_peers() {
+    let peers = {
+        let peers = LIVE_PEERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        peers
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect::<Vec<_>>()
+    };
+    for peer in peers {
+        peer.shutdown().await;
+    }
+}
 
 pub struct PeerOptions {
     pub claude_home: PathBuf,
@@ -43,6 +65,37 @@ pub(crate) struct Subscription {
     pub peer: PeerIdentity,
     pub message_id: String,
     pub created_at: i64,
+}
+
+/// daemon 설정을 바꾸기 전에 해당 대화의 TUI 소유권부터 확보한다.
+pub struct PeerOwnership {
+    _file: fs::File,
+    database: PathBuf,
+}
+
+impl PeerOwnership {
+    pub fn acquire(database: &std::path::Path) -> Result<Self> {
+        registry::private_directory(database.parent().context("peer inbox needs parent")?)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(database.with_extension("owner.lock"))?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.uid() == registry::uid() && metadata.mode() & 0o077 == 0,
+            "peer ownership file must be private"
+        );
+        file.try_lock()
+            .context("another terminal owns messaging for this conversation")?;
+        Ok(Self {
+            _file: file,
+            database: database.to_path_buf(),
+        })
+    }
 }
 
 pub struct Peer {
@@ -63,6 +116,7 @@ pub struct Peer {
     pub(crate) cancel: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
     closing: Mutex<()>,
+    inbox_owner: Mutex<Option<PeerOwnership>>,
 }
 
 impl Peer {
@@ -93,26 +147,33 @@ impl Peer {
     }
 
     pub async fn start(options: PeerOptions) -> Result<Arc<Self>> {
-        Self::start_inner(options, None).await
+        Self::start_inner(options, None, None).await
+    }
+
+    pub async fn start_owned(options: PeerOptions, owner: PeerOwnership) -> Result<Arc<Self>> {
+        Self::start_inner(options, None, Some(owner)).await
     }
 
     pub async fn replace(options: PeerOptions, previous: &Peer) -> Result<Arc<Self>> {
-        Self::start_inner(options, Some(&previous.identity().await)).await
+        Self::start_inner(options, Some(&previous.identity().await), None).await
     }
 
     async fn start_inner(
         options: PeerOptions,
         previous: Option<&PeerIdentity>,
+        owner: Option<PeerOwnership>,
     ) -> Result<Arc<Self>> {
-        if options.name.trim().is_empty()
-            || options.name.len() > 64
-            || options
-                .name
-                .chars()
-                .any(|c| c.is_control() || "<>\"&".contains(c))
-        {
-            bail!("peer name must be 1..64 bytes without control or markup characters");
-        }
+        crate::names::validate_name(&options.name)?;
+        let inbox_owner = match owner {
+            Some(owner) => {
+                anyhow::ensure!(
+                    owner.database == options.inbox_path,
+                    "peer ownership belongs to a different conversation"
+                );
+                owner
+            }
+            None => PeerOwnership::acquire(&options.inbox_path)?,
+        };
         registry::private_directory(&options.socket_directory)?;
         let pid = std::process::id();
         let path = options.socket_directory.join(format!(
@@ -145,6 +206,8 @@ impl Peer {
             status: "busy".into(),
             updated_at: now,
             status_updated_at: now,
+            spare: false,
+            parked_job_id: None,
         };
         let inbox = Inbox::open(&options.inbox_path).await?;
         let root = options.claude_home.join("sessions");
@@ -167,6 +230,7 @@ impl Peer {
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
             closing: Mutex::new(()),
+            inbox_owner: Mutex::new(Some(inbox_owner)),
         });
         let weak = Arc::downgrade(&peer);
         let cancel = peer.cancel.clone();
@@ -192,11 +256,42 @@ impl Peer {
             while connections.join_next().await.is_some() {}
         });
         *peer.task.lock().await = Some(task);
+        {
+            let mut peers = LIVE_PEERS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            peers.retain(|peer| peer.upgrade().is_some_and(|peer| !peer.is_closed()));
+            peers.push(Arc::downgrade(&peer));
+        }
         Ok(peer)
     }
 
     pub async fn identity(&self) -> PeerIdentity {
         self.identity.read().await.clone()
+    }
+
+    /// 먼저 원자적으로 등록 파일을 갱신한 뒤 메모리 이름을 교체한다.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "등록과 identity를 같은 순서로 잠가 종료 및 상태 갱신이 rename을 덮지 않도록 한다"
+    )]
+    pub async fn rename(&self, name: &str) -> Result<()> {
+        crate::names::validate_name(name)?;
+        let registration = self.registration.lock().await;
+        let registration = registration.as_ref().context("peer session has closed")?;
+        let mut identity = self.identity.write().await;
+        if identity.name == name {
+            return Ok(());
+        }
+        let mut updated = identity.clone();
+        updated.name = name.to_owned();
+        updated.name_source = "user".into();
+        updated.name_since = chrono::Utc::now().timestamp_millis();
+        updated.updated_at = updated.name_since;
+        registration.update(&updated)?;
+        *identity = updated;
+        Ok(())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<PeerIdentity>> {
@@ -271,13 +366,27 @@ impl Peer {
     }
 
     pub async fn claim(&self, seq: i64, message: &ReceivedMessage) -> Result<()> {
-        self.inbox.claim(seq, message).await
+        self.inbox.claim(seq, message).await?;
+        *self.hops.lock().await = message.hop_chain.clone();
+        Ok(())
     }
     pub async fn release(&self, seq: i64) -> Result<()> {
         self.inbox.release(seq).await
     }
     pub async fn processing(&self) -> Result<Vec<(i64, ReceivedMessage)>> {
         self.inbox.processing().await
+    }
+
+    pub async fn recorded(&self) -> Result<Vec<(i64, ReceivedMessage)>> {
+        self.inbox.recorded().await
+    }
+
+    pub async fn refuse(&self, seq: i64, message: &ReceivedMessage, reason: &str) -> Result<()> {
+        if self.inbox.refuse(seq).await? {
+            self.receipt(message, "dropped", Some(reason)).await;
+            self.inbox.receipt_sent(seq).await?;
+        }
+        Ok(())
     }
 
     pub async fn revalidate(
@@ -336,6 +445,10 @@ impl Peer {
         notices.push_back(text);
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "rename과 동일한 잠금 순서로 등록 파일과 identity의 원자적 갱신을 직렬화한다"
+    )]
     pub async fn set_status(&self, busy: bool, mode: PermissionMode) -> Result<()> {
         *self.mode.write().await = mode;
         for (seq, message) in self.inbox.denied().await? {
@@ -343,26 +456,25 @@ impl Peer {
             self.inbox.receipt_sent(seq).await?;
         }
         let status = if busy { "busy" } else { "idle" };
-        let changed_identity = {
+        {
+            let registration = self.registration.lock().await;
             let mut identity = self.identity.write().await;
             if identity.status != status {
-                identity.status = status.into();
-                identity.updated_at = chrono::Utc::now().timestamp_millis();
-                identity.status_updated_at = identity.updated_at;
-                Some(identity.clone())
-            } else {
-                None
+                let mut updated = identity.clone();
+                updated.status = status.into();
+                updated.updated_at = chrono::Utc::now().timestamp_millis();
+                updated.status_updated_at = updated.updated_at;
+                if let Some(registration) = registration.as_ref() {
+                    registration.update(&updated)?;
+                }
+                *identity = updated;
             }
-        };
-        if let Some(identity) = changed_identity
-            && let Some(registration) = self.registration.lock().await.as_ref()
-        {
-            registration.update(&identity)?;
         }
         if !busy
             && self.inbox.pending().await?.is_none()
             && self.inbox.held().await?.is_empty()
             && self.inbox.processing().await?.is_empty()
+            && self.inbox.recorded().await?.is_empty()
         {
             self.notify_subscribers("idle").await;
             self.hops.lock().await.clear();
@@ -393,6 +505,7 @@ impl Peer {
         })
         .await;
         self.registration.lock().await.take();
+        self.inbox_owner.lock().await.take();
     }
 
     async fn notify_subscribers(&self, state: &str) {

@@ -547,6 +547,66 @@ impl TurnRequestProcessor {
             if tool_output.name.is_empty() {
                 return Err(invalid_request("`toolOutput.name` must not be empty"));
             }
+            #[cfg(unix)]
+            if tool_output.namespace.as_deref() == Some("cross_session")
+                && tool_output.name == "received_message"
+            {
+                // 외부 peer는 사용자 입력/설정 변경으로 승격하지 않고 Core의 자동 턴 경계를 사용한다.
+                let peer_error = |message: &str, retryable: bool| {
+                    let mut error = invalid_request(message);
+                    error.data = Some(serde_json::json!({"claudex_peer_retryable": retryable}));
+                    error
+                };
+                let fields = serde_json::to_value(&params)
+                    .map_err(|_| peer_error("invalid peer input", false))?;
+                if fields.as_object().is_none_or(|fields| {
+                    fields.iter().any(|(key, value)| {
+                        !matches!(
+                            key.as_str(),
+                            "threadId" | "input" | "turnTrigger" | "toolOutput"
+                        ) && !value.is_null()
+                    })
+                }) {
+                    return Err(peer_error(
+                        "peer input cannot change conversation settings",
+                        false,
+                    ));
+                }
+                let FunctionCallOutputBody::Text(body) = &tool_output.output else {
+                    return Err(peer_error("peer input must be a text envelope", false));
+                };
+                if body.len() > 32_768 {
+                    return Err(peer_error("peer input exceeds its size limit", false));
+                }
+                let message = serde_json::from_str(body)
+                    .map_err(|_| peer_error("invalid peer envelope", false))?;
+                let submitted = codex_core::claude_peer::submit_external(thread.as_ref(), message)
+                    .await
+                    .map_err(|error| peer_error(&error.to_string(), error.retryable()))?;
+                let codex_protocol::turn_input::StartIfIdleSubmission::Started { turn_id } =
+                    submitted
+                else {
+                    return Err(peer_error(
+                        "peer receiver is not ready for an automatic turn",
+                        true,
+                    ));
+                };
+                self.outgoing
+                    .record_request_turn_id(&request_id, &turn_id)
+                    .await;
+                return Ok(TurnStartResponse {
+                    turn: Turn {
+                        id: turn_id,
+                        items: vec![],
+                        items_view: TurnItemsView::NotLoaded,
+                        error: None,
+                        status: TurnStatus::InProgress,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                });
+            }
         }
         let actual_chars = params
             .input

@@ -37,6 +37,10 @@ use std::sync::Weak;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[cfg(test)]
+#[path = "claude_peer_tests.rs"]
+mod tests;
+
 #[derive(Default)]
 struct Owner {
     requested: Option<ThreadId>,
@@ -52,6 +56,184 @@ pub(crate) struct PeerRuntime {
     pub(crate) peer: Arc<Peer>,
     dispatch: tokio::sync::Semaphore,
     admission: std::sync::Mutex<Option<(Option<PermissionMode>, bool)>>,
+}
+
+#[derive(Default)]
+pub(crate) struct FrontendPeerRuntime {
+    dispatch: Mutex<()>,
+    admission: std::sync::Mutex<Option<(Option<PermissionMode>, bool, InboundPolicy)>>,
+}
+
+impl FrontendPeerRuntime {
+    pub(crate) fn permits_mode(&self, mode: PermissionMode) -> bool {
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|(sender, released, policy)| {
+                released
+                    || match policy {
+                        InboundPolicy::Accept => true,
+                        InboundPolicy::Hold | InboundPolicy::Refuse => false,
+                        InboundPolicy::Parity => {
+                            sender == Some(mode)
+                                || sender.is_none() && mode == PermissionMode::Prompting
+                        }
+                    }
+            })
+    }
+}
+
+fn external_message(
+    item: &codex_protocol::models::ResponseItem,
+) -> Option<codex_claude_peer::ReceivedMessage> {
+    use codex_protocol::models::FunctionCallOutputBody;
+    use codex_protocol::models::ResponseItem;
+    match item {
+        ResponseItem::FunctionCallOutput {
+            call_id: None,
+            namespace: Some(namespace),
+            name: Some(name),
+            output,
+            ..
+        } if namespace == "cross_session" && name == "received_message" => {
+            let FunctionCallOutputBody::Text(text) = &output.body else {
+                return None;
+            };
+            serde_json::from_str(text).ok()
+        }
+        _ => None,
+    }
+}
+
+fn inbox_path(config: &Config, thread_id: ThreadId) -> PathBuf {
+    config
+        .codex_home
+        .join("claude-peer")
+        .join(format!("{thread_id}.sqlite"))
+        .to_path_buf()
+}
+
+fn inbound_policy(config: &Config) -> InboundPolicy {
+    match config.claude_peer_inbound {
+        ClaudePeerInbound::Parity => InboundPolicy::Parity,
+        ClaudePeerInbound::Accept => InboundPolicy::Accept,
+        ClaudePeerInbound::Hold => InboundPolicy::Hold,
+        ClaudePeerInbound::Refuse => InboundPolicy::Refuse,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExternalPeerError {
+    #[error("this conversation has no frontend peer")]
+    Unavailable,
+    #[error("peer input was not admitted by the frontend inbox")]
+    NotAdmitted,
+    #[error("peer input is temporarily unavailable")]
+    Temporary(#[source] anyhow::Error),
+}
+
+impl ExternalPeerError {
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Temporary(_))
+    }
+}
+
+struct FrontendAdmissionReset<'a>(&'a FrontendPeerRuntime);
+
+impl Drop for FrontendAdmissionReset<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// 공유 daemon에서도 사용자 입력으로 승격하지 않고 자동 턴의 기존 승인 경계를 거친다.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "대화별 수신 재시도를 직렬화해 persistence 확인과 admission 설정의 경합을 방지한다"
+)]
+pub async fn submit_external(
+    thread: &CodexThread,
+    message: codex_claude_peer::ReceivedMessage,
+) -> std::result::Result<StartIfIdleSubmission, ExternalPeerError> {
+    use codex_protocol::models::FunctionCallOutputBody;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    let config = thread.config().await;
+    if config.ephemeral || !config.mcp_servers.get().contains_key("cross_session") {
+        return Err(ExternalPeerError::Unavailable);
+    }
+    thread
+        .thread_extension_data()
+        .insert_if(FrontendPeerRuntime::default(), |current| current.is_none());
+    let runtime = thread
+        .thread_extension_data()
+        .get::<FrontendPeerRuntime>()
+        .ok_or(ExternalPeerError::Unavailable)?;
+    let _dispatch = runtime.dispatch.lock().await;
+    let database = inbox_path(&config, thread.session.thread_id);
+    let pending = codex_claude_peer::external_processing(&database)
+        .await
+        .map_err(ExternalPeerError::Temporary)?;
+    let (seq, _) = pending
+        .iter()
+        .find(|(_, stored)| stored == &message)
+        .ok_or(ExternalPeerError::NotAdmitted)?;
+    let first_attempt = codex_claude_peer::first_external_attempt(&database, *seq)
+        .await
+        .map_err(ExternalPeerError::Temporary)?;
+    if !first_attempt {
+        if thread.session.active_turn.lock().await.is_some() {
+            return Ok(StartIfIdleSubmission::NotSubmitted {
+                reason: codex_protocol::turn_input::NotSubmittedReason::NotIdle,
+            });
+        }
+        // 응답 유실/프로세스 종료 뒤 재시도만 history와 대조한다. 최초 전달은 전체 이력을 읽지 않는다.
+        let history = thread
+            .load_history(false)
+            .await
+            .map_err(|error| ExternalPeerError::Temporary(error.into()))?;
+        if history.items.iter().any(|item| matches!(item,
+            codex_history::RolloutItem::ResponseItem(item) if external_message(&item.item).as_ref() == Some(&message))) {
+            thread.session.flush_rollout().await.map_err(|error| ExternalPeerError::Temporary(error.into()))?;
+            codex_claude_peer::confirm_external_recorded(&database, &message).await.map_err(ExternalPeerError::Temporary)?;
+            return Ok(StartIfIdleSubmission::NotSubmitted { reason: codex_protocol::turn_input::NotSubmittedReason::Superseded });
+        }
+    }
+    let body = serde_json::to_string(&message)
+        .map_err(|error| ExternalPeerError::Temporary(error.into()))?;
+    *runtime
+        .admission
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+        message.mode,
+        message.approval_released,
+        inbound_policy(&config),
+    ));
+    let _reset = FrontendAdmissionReset(&runtime);
+    let input = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: None,
+        name: Some("received_message".into()),
+        namespace: Some("cross_session".into()),
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(body),
+            success: None,
+        },
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let result = thread
+        .start_turn_if_idle(
+            TurnInputRequest::new(TurnInput::ResponseItem(input)).on_start(TurnStartOptions {
+                turn_trigger: Some("claude_peer".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
+    result.map_err(|error| ExternalPeerError::Temporary(error.into()))
 }
 
 impl PeerRuntime {
@@ -78,6 +260,15 @@ pub(crate) async fn confirm_recorded(
     session: &crate::session::session::Session,
     items: &[codex_protocol::models::ResponseItem],
 ) -> Result<()> {
+    let external: Vec<_> = items.iter().filter_map(external_message).collect();
+    if !external.is_empty() {
+        let config = session.get_config().await;
+        let database = inbox_path(&config, session.thread_id);
+        session.flush_rollout().await?;
+        for message in external {
+            codex_claude_peer::confirm_external_recorded(&database, &message).await?;
+        }
+    }
     let Some(runtime) = session.services.thread_extension_data.get::<PeerRuntime>() else {
         return Ok(());
     };
@@ -254,6 +445,12 @@ impl Contributor {
         let thread_id = ThreadId::from_string(level)?;
         let thread = manager.get_thread(thread_id).await?;
         let config = thread.config().await;
+        if config.mcp_servers.get().contains_key("cross_session") && !config.ephemeral {
+            thread
+                .thread_extension_data()
+                .insert_if(FrontendPeerRuntime::default(), |current| current.is_none());
+            return Ok(());
+        }
         if config.claude_peer_name.is_none()
             || !matches!(
                 thread.session_source,

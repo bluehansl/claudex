@@ -19,23 +19,46 @@ use tokio::process::Command;
 pub struct PeerIdentity {
     pub pid: u32,
     pub session_id: String,
+    #[serde(default)]
     pub cwd: String,
     pub started_at: i64,
+    #[serde(default)]
     pub proc_start: String,
+    #[serde(default)]
     pub version: String,
+    #[serde(default = "protocol_v1")]
     pub peer_protocol: u32,
     #[serde(default)]
     pub peer_features: Vec<String>,
     pub kind: String,
+    #[serde(default)]
     pub entrypoint: String,
+    #[serde(default = "local_pid_domain")]
     pub pid_domain: String,
     pub messaging_socket_path: PathBuf,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub name_source: String,
+    #[serde(default)]
     pub name_since: i64,
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub updated_at: i64,
+    #[serde(default)]
     pub status_updated_at: i64,
+    #[serde(default)]
+    pub spare: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_job_id: Option<String>,
+}
+
+fn protocol_v1() -> u32 {
+    1
+}
+fn local_pid_domain() -> String {
+    pid_domain().into()
 }
 
 impl PeerIdentity {
@@ -48,9 +71,25 @@ impl PeerIdentity {
         format!("{hash:x}")[..6].to_owned()
     }
 
+    fn matches_reference(&self, reference: &str) -> bool {
+        if !(6..=12).contains(&reference.len())
+            || !reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return false;
+        }
+        let hash = Sha256::digest(format!("session:{}", self.messaging_socket_path.display()));
+        format!("{hash:x}").starts_with(&reference.to_ascii_lowercase())
+    }
+
     pub(crate) async fn is_live(&self) -> bool {
         self.peer_protocol == 1
-            && self.name.chars().count() <= 64
+            && !self.spare
+            && self.parked_job_id.is_none()
+            && matches!(
+                self.kind.as_str(),
+                "interactive" | "bg" | "daemon" | "daemon-worker"
+            )
+            && self.name.chars().count() <= 200
             && !self.name.chars().any(char::is_control)
             && uuid::Uuid::parse_str(&self.session_id).is_ok()
             && self.pid_domain == pid_domain()
@@ -58,6 +97,12 @@ impl PeerIdentity {
                 .await
                 .is_ok_and(|start| start == self.proc_start)
             && socket_metadata(&self.messaging_socket_path).is_ok()
+            && tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                tokio::net::UnixStream::connect(&self.messaging_socket_path),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok())
     }
 }
 
@@ -170,6 +215,9 @@ pub(crate) struct PeerKey {
 
 pub(crate) async fn list(root: &Path) -> Result<Vec<PeerIdentity>> {
     let mut peers = Vec::new();
+    if !root.exists() {
+        return Ok(peers);
+    }
     for entry in fs::read_dir(root)? {
         let path = entry?.path();
         if path.extension().is_none_or(|extension| extension != "json") {
@@ -185,9 +233,15 @@ pub(crate) async fn list(root: &Path) -> Result<Vec<PeerIdentity>> {
         let Ok(bytes) = read_owned_file(&path, 16_384, false) else {
             continue;
         };
-        let Ok(peer) = serde_json::from_slice::<PeerIdentity>(&bytes) else {
+        let Ok(mut peer) = serde_json::from_slice::<PeerIdentity>(&bytes) else {
             continue;
         };
+        if peer.proc_start.is_empty() {
+            let Ok(start) = process_start(peer.pid).await else {
+                continue;
+            };
+            peer.proc_start = start;
+        }
         if peer.pid == pid && peer.is_live().await {
             peers.push(peer);
         }
@@ -206,7 +260,7 @@ pub(crate) async fn resolve(root: &Path, target: &str) -> Result<PeerIdentity> {
         .filter(|peer| {
             target == peer.name
                 || target == peer.session_id
-                || target == peer.reference()
+                || peer.matches_reference(target)
                 || target == format!("{} [{}]", peer.name, peer.reference())
                 || target == peer.address()
                 || target == peer.messaging_socket_path.to_string_lossy()

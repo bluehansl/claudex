@@ -323,6 +323,46 @@ impl App {
             model = updated_model;
         }
         let dynamic_tool_status_updates = tokio::sync::broadcast::channel(/*capacity*/ 64).0;
+        #[cfg(unix)]
+        if !config.ephemeral
+            && !matches!(&app_server_target, AppServerTarget::Remote { .. })
+            && !crate::uses_remote_workspace_or_environment(
+                &app_server_target,
+                environment_manager.as_ref(),
+            )
+            && !cli_kv_overrides
+                .iter()
+                .any(|(key, value)| key == "claude_peer_name" && value.as_str() == Some(""))
+        {
+            if !crate::claude_peer::matching_home(
+                config.codex_home.as_path(),
+                app_server.server_codex_home(),
+                app_server.uses_embedded_app_server(),
+            ) {
+                app_event_tx.send(AppEvent::PeerNotice("Cross-session messaging is unavailable: TUI and server must use the same local CODEX_HOME.".into()));
+            } else if crate::claude_peer::supported_backend(
+                app_server.server_version(),
+                app_server.uses_embedded_app_server(),
+            ) {
+                match crate::claude_peer::PeerServer::start(
+                    config.clone(),
+                    app_server.request_handle(),
+                    app_event_tx.clone(),
+                )
+                .await
+                {
+                    Ok(peer) => app_server.peer_tools = Some(peer),
+                    Err(error) => {
+                        tracing::warn!("cross-session messaging is unavailable: {error}");
+                        app_event_tx.send(AppEvent::PeerNotice(format!(
+                            "Cross-session messaging is unavailable: {error}"
+                        )));
+                    }
+                }
+            } else {
+                app_event_tx.send(AppEvent::PeerNotice("Cross-session messaging requires Claudex server 0.159.1 or newer. Update/restart the server with /daemon, or relaunch with --no-daemon.".into()));
+            }
+        }
         if matches!(&app_server_target, AppServerTarget::LocalDaemon { .. })
             && !crate::uses_remote_workspace_or_environment(
                 &app_server_target,

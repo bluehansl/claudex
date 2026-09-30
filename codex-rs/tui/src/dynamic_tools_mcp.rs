@@ -55,11 +55,21 @@ pub(crate) enum ThreadToolTransport {
     Disabled,
     Dynamic,
     Mcp(Arc<DynamicToolMcpServer>),
+    #[cfg(unix)]
+    WithPeer(
+        Box<ThreadToolTransport>,
+        Arc<crate::claude_peer::PeerServer>,
+    ),
 }
 
 impl ThreadToolTransport {
     pub(crate) fn configure(&self, params: &mut ThreadStartParams) {
         match self {
+            #[cfg(unix)]
+            Self::WithPeer(inner, peer) => {
+                inner.configure(params);
+                peer.configure(&mut params.config);
+            }
             Self::Disabled => params.dynamic_tools = None,
             Self::Dynamic => {
                 params.dynamic_tools = Some(dynamic_tools::non_delegation_tool_specs());
@@ -72,11 +82,51 @@ impl ThreadToolTransport {
     }
 
     pub(crate) fn configure_mcp(&self, config: &mut Option<HashMap<String, Value>>) {
+        #[cfg(unix)]
+        if let Self::WithPeer(inner, peer) = self {
+            inner.configure_mcp(config);
+            peer.configure(config);
+            return;
+        }
         if let Self::Mcp(server) = self {
             config.get_or_insert_default().insert(
                 format!("mcp_servers.{}", dynamic_tools::NAMESPACE),
                 server.config.clone(),
             );
+        }
+    }
+
+    pub(crate) fn task_mcp(&self) -> Option<Arc<DynamicToolMcpServer>> {
+        match self {
+            Self::Mcp(server) => Some(Arc::clone(server)),
+            #[cfg(unix)]
+            Self::WithPeer(inner, _) => inner.task_mcp(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn configure_resume_mcp(
+        &self,
+        config: &mut Option<HashMap<String, Value>>,
+        owns_peer: bool,
+    ) {
+        #[cfg(unix)]
+        if let Self::WithPeer(inner, peer) = self {
+            inner.configure_mcp(config);
+            if owns_peer {
+                peer.configure(config);
+            }
+            return;
+        }
+        let _ = owns_peer;
+        self.configure_mcp(config);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn peer(&self) -> Option<Arc<crate::claude_peer::PeerServer>> {
+        match self {
+            Self::WithPeer(_, peer) => Some(Arc::clone(peer)),
+            _ => None,
         }
     }
 }

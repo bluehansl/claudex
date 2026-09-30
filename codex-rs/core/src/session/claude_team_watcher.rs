@@ -137,6 +137,12 @@ async fn exit_process_after_shutdown_approval(session: &Arc<Session>) -> ! {
             );
         }
     }
+    #[cfg(unix)]
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        codex_claude_peer::shutdown_owned_peers(),
+    )
+    .await;
     process::exit(0);
 }
 

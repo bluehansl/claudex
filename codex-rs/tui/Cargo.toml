@@ -40,6 +40,7 @@ codex-config = { workspace = true }
 codex-context-fragments = { workspace = true }
 codex-connectors = { workspace = true }
 codex-core-plugins = { workspace = true }
+codex-claude-peer = { workspace = true }
 codex-history = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }

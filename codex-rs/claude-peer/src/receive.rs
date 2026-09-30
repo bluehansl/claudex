@@ -80,7 +80,10 @@ impl Peer {
         }
         let bytes =
             registry::read_owned_file(&self.root.join(format!("{pid}.json")), 16_384, false)?;
-        let sender: PeerIdentity = serde_json::from_slice(&bytes)?;
+        let mut sender: PeerIdentity = serde_json::from_slice(&bytes)?;
+        if sender.proc_start.is_empty() {
+            sender.proc_start = registry::process_start(pid).await?;
+        }
         if sender.pid != pid || !sender.is_live().await {
             bail!("sender registry is stale");
         }

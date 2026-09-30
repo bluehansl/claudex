@@ -279,6 +279,7 @@ fn primary_spans(row: &SearchResult, base_style: Style) -> Vec<Span<'static>> {
         MentionType::Plugin => base_style.fg(crate::style::accent_color()),
         MentionType::Skill => base_style.dim(),
         MentionType::Task => base_style.cyan(),
+        MentionType::Peer => base_style.green(),
         MentionType::File | MentionType::Directory => base_style,
     };
     if let Some(indices) = row.match_indices.as_ref() {

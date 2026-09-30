@@ -336,6 +336,7 @@ impl ChatWidget {
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
                 self.show_rename_prompt();
             }
+            SlashCommand::Peers => self.show_peer_picker(),
             SlashCommand::Model => {
                 self.open_model_popup();
                 self.defer_input_until_settings_applied();
@@ -1229,6 +1230,7 @@ impl ChatWidget {
             | SlashCommand::App
             | SlashCommand::Rename
             | SlashCommand::Voice
+            | SlashCommand::Peers
             | SlashCommand::Recap
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Cd => match self.thread_id {

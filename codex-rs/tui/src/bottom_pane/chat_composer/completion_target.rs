@@ -7,6 +7,49 @@ use crate::bottom_pane::textarea::TextArea;
 use crate::mention_codec::is_common_env_var;
 use std::ops::Range;
 
+/// 공백이 있는 peer 이름은 닫는 따옴표까지 한 검색어로 취급한다.
+pub(super) fn current_quoted_peer_token_range(
+    textarea: &TextArea,
+) -> Option<(Range<usize>, String)> {
+    let text = textarea.text();
+    let cursor = textarea.cursor().min(text.len());
+    let before = text.get(..cursor)?;
+    let start = before.rfind("@\"")?;
+    if start > 0
+        && !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{'))
+    {
+        return None;
+    }
+    let body_start = start + 2;
+    let after_open = text.get(body_start..)?;
+    let close = after_open.find('"').map(|index| body_start + index);
+    let end = close.map_or_else(
+        || {
+            text[body_start..]
+                .find('\n')
+                .map_or(text.len(), |index| body_start + index)
+        },
+        |index| index + 1,
+    );
+    if cursor < body_start || cursor > end {
+        return None;
+    }
+    let query = text.get(body_start..close.unwrap_or(end))?;
+    if query.chars().count() > 200
+        || query.chars().any(char::is_control)
+        || textarea
+            .text_element_ranges_overlapping(start..end)
+            .next()
+            .is_some()
+    {
+        return None;
+    }
+    Some((start..end, query.to_owned()))
+}
+
 /// Narrows one whitespace-delimited candidate to the editable segment around `anchor`.
 ///
 /// Atomic elements form hard boundaries. If the anchor is inside an element, the raw candidate is

@@ -1920,6 +1920,71 @@ impl ChatWidget {
         self.thread_name.clone()
     }
 
+    #[cfg(unix)]
+    pub(crate) fn peer_context(&self) -> Option<crate::claude_peer::PeerContext> {
+        let thread_id = self.thread_id?;
+        if self.blocks_direct_input || self.config.ephemeral {
+            return None;
+        }
+        let mode = if self.config.permissions.approval_policy.value()
+            == codex_protocol::protocol::AskForApproval::Never
+            && matches!(
+                self.config.permissions.effective_permission_profile(),
+                codex_protocol::models::PermissionProfile::Disabled
+            ) {
+            codex_claude_peer::PermissionMode::Bypass
+        } else {
+            codex_claude_peer::PermissionMode::Prompting
+        };
+        Some(crate::claude_peer::PeerContext {
+            thread_id,
+            name: self
+                .thread_name
+                .clone()
+                .or_else(|| self.config.claude_peer_name.clone())
+                .unwrap_or_else(|| crate::claude_peer::fallback_name(thread_id)),
+            cwd: self.config.cwd.to_path_buf(),
+            mode,
+            busy: self.bottom_pane.is_task_running(),
+            can_receive: true,
+        })
+    }
+
+    pub(crate) fn set_peer_mentions(&mut self, peers: Vec<crate::peer_mentions::PeerMention>) {
+        self.bottom_pane.set_peer_mentions(peers);
+    }
+
+    pub(crate) fn insert_peer_mention(&mut self, peer: &crate::peer_mentions::PeerMention) {
+        self.bottom_pane.insert_peer_mention(peer);
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_peer_picker(&mut self) {
+        let items = self
+            .bottom_pane
+            .peer_mentions()
+            .iter()
+            .cloned()
+            .map(|peer| crate::bottom_pane::SelectionItem {
+                name: format!("{} [{}]", peer.name, peer.reference),
+                description: Some(format!("{} · {}", peer.status, peer.address)),
+                search_value: Some(peer.name.clone()),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SelectPeer(peer.clone()))
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            })
+            .collect();
+        self.show_selection_view(crate::bottom_pane::SelectionViewParams {
+            title: Some("Local sessions".into()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search sessions".into()),
+            ..crate::bottom_pane::SelectionViewParams::picker()
+        });
+    }
+
     /// Returns the current thread's precomputed rollout path.
     ///
     /// For fresh non-ephemeral threads this path may exist before the file is

@@ -117,6 +117,8 @@ mod backend_banners;
 mod bottom_pane;
 mod branch_summary;
 mod chatwidget;
+#[cfg(unix)]
+mod claude_peer;
 mod cli;
 mod clipboard_copy;
 mod clipboard_html;
@@ -129,6 +131,7 @@ pub(crate) mod custom_terminal;
 mod daybreak;
 mod experimental_features;
 mod markdown_copy;
+mod peer_mentions;
 mod permission_discovery;
 mod pets;
 mod worktree_browser;
@@ -3025,6 +3028,9 @@ requires_openai_auth = {requires_openai_auth}
 
     #[tokio::test]
     async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
+        #[cfg(target_os = "macos")]
+        let codex_home = tempfile::Builder::new().tempdir_in("/tmp")?;
+        #[cfg(not(target_os = "macos"))]
         let codex_home = TempDir::new()?;
         let socket_path =
             codex_app_server_client::app_server_control_socket_path(codex_home.path())?;

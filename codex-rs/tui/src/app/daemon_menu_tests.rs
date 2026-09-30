@@ -126,6 +126,7 @@ async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
             snapshot,
             render_bottom_popup(&app.chat_widget, width)
                 .replace(r"C:\cli-build\bin\codex", "/x/cli-build/bin/codex")
+                .replace(env!("CARGO_PKG_VERSION"), "0.0.0")
         );
         // The default choice cancels without emitting an update or exiting.
         app.chat_widget.handle_key_event(KeyCode::Enter.into());

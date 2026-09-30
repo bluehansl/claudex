@@ -22,7 +22,10 @@
 //!
 //! # Mention Menus
 //!
-//! By default, `@` lists plugins, filesystem entries, and skills. Skills are hidden when their
+//! By default, `@` lists plugins, filesystem entries, skills, and live local peers after a prefix.
+//! Peer selections bind a session ID rather than resolving a mutable display name on submit.
+//! Quoted peer names remain editable across spaces until selected as an atomic mention.
+//! Skills are hidden when their
 //! owning plugin is listed. `$` lists individual skills and apps, but not plugins.
 //! Disabling `mentions_v2` restores file-only `@` search and adds plugins back to `$`.
 //!
@@ -628,6 +631,7 @@ pub(crate) struct ChatComposer {
     skills: Option<Vec<SkillMetadata>>,
     plugins: Option<Vec<PluginCapabilitySummary>>,
     task_mentions: Option<Vec<crate::task_mentions::TaskMention>>,
+    peer_mentions: Vec<crate::peer_mentions::PeerMention>,
     connectors_snapshot: Option<ConnectorsSnapshot>,
     collaboration_modes_enabled: bool,
     config: ChatComposerConfig,
@@ -800,6 +804,7 @@ impl ChatComposer {
             skills: None,
             plugins: None,
             task_mentions: None,
+            peer_mentions: Vec::new(),
             connectors_snapshot: None,
             collaboration_modes_enabled: false,
             config,
@@ -897,6 +902,34 @@ impl ChatComposer {
         self.sync_popups();
     }
 
+    pub(crate) fn set_peer_mentions(&mut self, peers: Vec<crate::peer_mentions::PeerMention>) {
+        if self.peer_mentions == peers {
+            return;
+        }
+        self.peer_mentions = peers;
+        self.refresh_mentions_v2_popup_candidates();
+        if let Some(frame) = &self.frame_requester {
+            frame.schedule_frame();
+        }
+    }
+
+    pub(crate) fn peer_mentions(&self) -> &[crate::peer_mentions::PeerMention] {
+        &self.peer_mentions
+    }
+
+    pub(crate) fn insert_peer_mention(&mut self, peer: &crate::peer_mentions::PeerMention) {
+        let cursor = self.draft.textarea.cursor();
+        self.insert_selected_mention(
+            cursor..cursor,
+            &codex_claude_peer::names::mention(&peer.name),
+            Some(&format!(
+                "{}{}",
+                crate::peer_mentions::PATH_PREFIX,
+                peer.session_id
+            )),
+        );
+    }
+
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
         self.task_mentions = enabled.then(Vec::new);
         self.refresh_mentions_v2_popup_candidates();
@@ -943,11 +976,13 @@ impl ChatComposer {
         let ActivePopup::MentionV2(popup) = &mut self.popups.active else {
             return;
         };
-        popup.set_candidates(super::mentions_v2::build_search_catalog(
+        let mut candidates = super::mentions_v2::build_search_catalog(
             self.skills.as_deref(),
             self.plugins.as_deref(),
             self.task_mentions.as_deref().unwrap_or_default(),
-        ));
+        );
+        candidates.extend(super::mentions_v2::build_peer_catalog(&self.peer_mentions));
+        popup.set_candidates(candidates);
     }
 
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
@@ -2695,7 +2730,9 @@ impl ChatComposer {
         if !self.mentions_v2_enabled {
             return None;
         }
-        self.current_editable_at_token_range_with_options(/*allow_empty*/ true)
+        completion_target::current_quoted_peer_token_range(&self.draft.textarea).or_else(|| {
+            self.current_editable_at_token_range_with_options(/*allow_empty*/ true)
+        })
     }
 
     fn current_mentions_v2_token(&self) -> Option<String> {
@@ -2809,6 +2846,9 @@ impl ChatComposer {
         let mention = if path
             .and_then(crate::task_mentions::valid_thread_path)
             .is_some()
+            || path
+                .and_then(crate::peer_mentions::target_from_path)
+                .is_some()
         {
             insert_text
                 .strip_prefix('@')
@@ -2892,7 +2932,8 @@ impl ChatComposer {
             .into_iter()
             .filter_map(|snapshot| {
                 if let Some(binding) = self.draft.mention_bindings.get(&snapshot.id)
-                    && crate::task_mentions::valid_thread_path(&binding.path).is_some()
+                    && (crate::task_mentions::valid_thread_path(&binding.path).is_some()
+                        || crate::peer_mentions::target_from_path(&binding.path).is_some())
                     && snapshot.text == format!("{}{}", binding.sigil, binding.mention)
                 {
                     return Some((snapshot.id, binding.sigil, binding.mention.clone()));
@@ -2930,7 +2971,9 @@ impl ChatComposer {
         let mut scan_from = 0usize;
         for binding in mention_bindings {
             let token = format!("{}{}", binding.sigil, binding.mention);
-            let range = if crate::task_mentions::valid_thread_path(&binding.path).is_some() {
+            let range = if crate::task_mentions::valid_thread_path(&binding.path).is_some()
+                || crate::peer_mentions::target_from_path(&binding.path).is_some()
+            {
                 self.draft
                     .textarea
                     .text_element_snapshots()
@@ -4217,11 +4260,12 @@ impl ChatComposer {
                 popup.set_query(&query);
             }
             _ => {
-                let candidates = super::mentions_v2::build_search_catalog(
+                let mut candidates = super::mentions_v2::build_search_catalog(
                     self.skills.as_deref(),
                     self.plugins.as_deref(),
                     self.task_mentions.as_deref().unwrap_or_default(),
                 );
+                candidates.extend(super::mentions_v2::build_peer_catalog(&self.peer_mentions));
                 self.popups.active =
                     ActivePopup::MentionV2(MentionV2Popup::new(candidates, &query));
             }
@@ -6860,6 +6904,31 @@ mod tests {
             .expect("expected connector mention to be selected");
         assert_eq!(mention.insert_text, "$notion".to_string());
         assert_eq!(mention.path, Some("app://connector_1".to_string()));
+    }
+
+    #[test]
+    fn quoted_peer_mentions_preserve_the_session_binding() {
+        let (tx, _) = unbounded_channel::<AppEvent>();
+        let mut composer =
+            ChatComposer::new(true, AppEventSender::new(tx), false, String::new(), false);
+        composer.set_mentions_v2_enabled(true);
+        composer.set_text_content("문의 @\"claudex 업".into(), Vec::new(), Vec::new());
+        composer
+            .draft
+            .textarea
+            .set_cursor(composer.draft.textarea.text().len());
+        let (range, query) = composer
+            .current_mentions_v2_token_range()
+            .expect("quoted query");
+        assert_eq!(query, "claudex 업");
+        assert_eq!(range.start, "문의 ".len());
+        let path = "claude-peer://00000000-0000-4000-8000-000000000001";
+        composer.insert_selected_mention(range, "@\"claudex 업데이트\"", Some(path));
+        let bindings = composer.snapshot_mention_bindings();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].path, path);
+        assert_eq!(bindings[0].mention, "\"claudex 업데이트\"");
+        assert!(composer.current_mentions_v2_token_range().is_none());
     }
 
     #[test]

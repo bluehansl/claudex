@@ -448,6 +448,18 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_peer_mentions(&mut self, peers: Vec<crate::peer_mentions::PeerMention>) {
+        self.composer.set_peer_mentions(peers);
+    }
+
+    pub(crate) fn peer_mentions(&self) -> &[crate::peer_mentions::PeerMention] {
+        self.composer.peer_mentions()
+    }
+
+    pub(crate) fn insert_peer_mention(&mut self, peer: &crate::peer_mentions::PeerMention) {
+        self.composer.insert_peer_mention(peer);
+    }
+
     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
         self.composer.set_agents_navigation_enabled(enabled);
         self.request_redraw();

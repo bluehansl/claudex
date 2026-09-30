@@ -26,15 +26,29 @@ claudex --version
 
 ## Claude 세션 연결
 
-Claude Code 독립 세션과 통신할 때는 peer 이름을 지정합니다.
+로컬 대화형 세션은 Claude Code의 통신 목록에 자동 등록됩니다.
+저장된 대화 제목이 있으면 그 이름을 사용하며, `/rename`으로 변경하면 통신 이름도 갱신됩니다.
 
 ```shell
-claudex --claude-peer my-claudex
+claudex
 claudex peer list
 ```
 
+대화창에서는 `/peers`로 상대를 선택하거나 `@` 뒤에 세션 이름의 앞부분을 입력합니다.
+선택은 대상 참조를 입력할 뿐 메시지를 즉시 보내지는 않습니다. AI에게 전송할 내용을 요청하세요.
+Claude에서도 `/list-agents`와 `@이름`으로 조회할 수 있으며, 공백이 있는 이름은 `@"세션 이름"`으로 표시됩니다.
+
+`--claude-peer <이름>`은 대화 제목이 없을 때의 초기 이름을 지정합니다.
+`--no-claude-peer`는 해당 실행의 로컬 통신 기능을 끕니다.
+유효하지 않은 멘션 이름에는 기존 이름 또는 생성한 이름을 사용합니다.
+
+소켓은 각 TUI가 소유하므로 공유 daemon에서도 세션이 서로 등록을 덮어쓰지 않습니다.
+TUI와 서버는 같은 로컬 `CODEX_HOME`을 사용해야 하며, 서버는 Claudex 0.159.1 이상이어야 합니다.
+구버전 서버가 실행 중이면 `/daemon`에서 갱신·재시작하거나 `--no-daemon`으로 실행합니다.
+원격 서버와 임시(ephemeral) 대화는 자동 등록하지 않습니다.
+
 Claude Team 연결은 별도의 `--claude-team`, `--claude-team-agent` 옵션을 사용합니다.
-peer 메시징과 Team inbox는 다른 프로토콜이며, 해당 세션은 공유 daemon 대신 로컬 프로세스로 실행됩니다.
+Team inbox와 peer 메시징은 별개이며, Team의 프로세스 종료 동작을 보호하기 위해 Team 연결은 독립 실행을 유지합니다.
 
 ## 개발과 배포
 

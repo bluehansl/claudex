@@ -91,6 +91,9 @@ pub struct Cli {
     /// Enable Claude Code cross-session messaging under this name.
     #[arg(long = "claude-peer", value_name = "NAME")]
     pub claude_peer_name: Option<String>,
+    /// Disable local cross-session discovery and messaging for this TUI.
+    #[arg(long, conflicts_with = "claude_peer_name")]
+    pub no_claude_peer: bool,
     /// Run without the shared background server, even if it is already running.
     #[arg(long)]
     pub no_daemon: bool,

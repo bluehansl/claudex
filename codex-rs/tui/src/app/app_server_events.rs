@@ -119,6 +119,56 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        #[cfg(unix)]
+        if let Some(peer) = &app_server_client.peer_tools {
+            match &notification {
+                ServerNotification::ThreadStatusChanged(update) => {
+                    if let Ok(id) = ThreadId::from_string(&update.thread_id) {
+                        peer.update_status(
+                            id,
+                            matches!(
+                                update.status,
+                                codex_app_server_protocol::ThreadStatus::Active { .. }
+                            ),
+                        );
+                    }
+                }
+                ServerNotification::ThreadSettingsUpdated(update) => {
+                    if let Ok(id) = ThreadId::from_string(&update.thread_id) {
+                        let settings = &update.thread_settings;
+                        let mode = if settings.approval_policy
+                            == codex_app_server_protocol::AskForApproval::Never
+                            && matches!(
+                                settings.sandbox_policy,
+                                codex_app_server_protocol::SandboxPolicy::DangerFullAccess
+                            ) {
+                            codex_claude_peer::PermissionMode::Bypass
+                        } else {
+                            codex_claude_peer::PermissionMode::Prompting
+                        };
+                        peer.update_permissions(id, mode);
+                    }
+                }
+                ServerNotification::ThreadArchived(update) => {
+                    if let Ok(id) = ThreadId::from_string(&update.thread_id) {
+                        peer.close_thread(id);
+                    }
+                }
+                ServerNotification::ThreadDeleted(update) => {
+                    if let Ok(id) = ThreadId::from_string(&update.thread_id) {
+                        peer.close_thread(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        #[cfg(unix)]
+        if let ServerNotification::ThreadNameUpdated(update) = &notification
+            && let Some(peer) = &app_server_client.peer_tools
+            && let Ok(thread_id) = ThreadId::from_string(&update.thread_id)
+        {
+            peer.rename(thread_id, update.thread_name.as_deref());
+        }
         // A picker can leave an old runtime's close notification queued while the same thread
         // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
         // unloaded before routing a close that would exit the TUI or switch away from it.
@@ -539,10 +589,10 @@ impl App {
 
             let requires_mcp = crate::dynamic_tools::DELEGATION_TOOLS
                 .contains(&params.tool.as_str())
-                || matches!(
-                    app_server_client.thread_tool_transport(),
-                    crate::dynamic_tools_mcp::ThreadToolTransport::Mcp(_)
-                );
+                || app_server_client
+                    .thread_tool_transport()
+                    .task_mcp()
+                    .is_some();
             if app_server_client.uses_embedded_app_server()
                 || requires_mcp
                 || codex_protocol::ThreadId::from_string(&params.thread_id)

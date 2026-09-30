@@ -40,8 +40,12 @@ pub(super) async fn reconnect(
     if matches!(target, AppServerTarget::Embedded) {
         color_eyre::eyre::bail!("in-process sessions have no connection to restore");
     }
-    if let ThreadToolTransport::Mcp(server) = &task_tools {
+    if let Some(server) = task_tools.task_mcp() {
         server.suspend();
+    }
+    #[cfg(unix)]
+    if let Some(peer) = task_tools.peer() {
+        peer.suspend();
     }
     if presentation == ReconnectPresentation::Conversation && thread_id.is_none() {
         color_eyre::eyre::bail!(
@@ -467,8 +471,12 @@ impl App {
             );
         }
         // Only accept fresh task-tool calls once this connection and its event queue are adopted.
-        if let ThreadToolTransport::Mcp(server) = app_server.thread_tool_transport() {
+        if let Some(server) = app_server.thread_tool_transport().task_mcp() {
             server.reconnect(app_server.request_handle(), self.app_event_tx.clone());
+        }
+        #[cfg(unix)]
+        if let Some(peer) = &app_server.peer_tools {
+            peer.reconnect(app_server.request_handle());
         }
         self.reconnect.offline = false;
         self.chat_widget.update_account_state(

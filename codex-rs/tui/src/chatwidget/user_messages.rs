@@ -604,8 +604,9 @@ pub(crate) fn mention_bindings_from_user_inputs(
                 } else {
                     name.clone()
                 };
-                let sigil = if plugin_id.is_some()
-                    && mention_start(PLUGIN_TEXT_MENTION_SIGIL, &mention).is_some()
+                let sigil = if crate::peer_mentions::target_from_path(path).is_some()
+                    || (plugin_id.is_some()
+                        && mention_start(PLUGIN_TEXT_MENTION_SIGIL, &mention).is_some())
                 {
                     PLUGIN_TEXT_MENTION_SIGIL
                 } else {

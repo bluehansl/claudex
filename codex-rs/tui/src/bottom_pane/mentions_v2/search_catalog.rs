@@ -64,6 +64,30 @@ pub(crate) fn build_search_catalog(
     candidates
 }
 
+pub(crate) fn build_peer_catalog(peers: &[crate::peer_mentions::PeerMention]) -> Vec<Candidate> {
+    peers
+        .iter()
+        .filter(|peer| codex_claude_peer::names::validate_name(&peer.name).is_ok())
+        .map(|peer| Candidate {
+            display_name: peer.name.clone(),
+            description: Some(format!(
+                "local session · {} · {}",
+                peer.status, peer.reference
+            )),
+            search_terms: vec![codex_claude_peer::names::normalize_name(&peer.name)],
+            mention_type: MentionType::Peer,
+            selection: Selection::Tool {
+                insert_text: codex_claude_peer::names::mention(&peer.name),
+                path: Some(format!(
+                    "{}{}",
+                    crate::peer_mentions::PATH_PREFIX,
+                    peer.session_id
+                )),
+            },
+        })
+        .collect()
+}
+
 fn skill_candidate(skill: &SkillMetadata) -> Candidate {
     let display_name = skill_display_name(skill);
     let description = optional_skill_description(skill);

@@ -20,6 +20,7 @@ pub(super) enum MentionType {
     Plugin,
     Skill,
     Task,
+    Peer,
     File,
     Directory,
 }
@@ -34,6 +35,7 @@ impl MentionType {
             Self::Plugin => base_style.fg(crate::style::accent_color()),
             Self::Skill => base_style.dim(),
             Self::Task => base_style.cyan(),
+            Self::Peer => base_style.green(),
             Self::File => base_style.cyan(),
             Self::Directory => base_style,
         };
@@ -45,6 +47,7 @@ impl MentionType {
             Self::Plugin => "Plugin",
             Self::Skill => "Skill",
             Self::Task => "Task",
+            Self::Peer => "Peer",
             Self::File => "File",
             Self::Directory => "Dir",
         }

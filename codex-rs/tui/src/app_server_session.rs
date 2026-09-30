@@ -325,6 +325,8 @@ pub(crate) struct AppServerSession {
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
     dynamic_tool_mcp: Option<Arc<DynamicToolMcpServer>>,
+    #[cfg(unix)]
+    pub(crate) peer_tools: Option<Arc<crate::claude_peer::PeerServer>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,6 +437,8 @@ impl AppServerSession {
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
             dynamic_tool_mcp: None,
+            #[cfg(unix)]
+            peer_tools: None,
         }
     }
 
@@ -494,17 +498,26 @@ impl AppServerSession {
     }
 
     pub(crate) fn thread_tool_transport(&self) -> ThreadToolTransport {
-        if self.uses_embedded_app_server() {
+        let transport = if self.uses_embedded_app_server() {
             ThreadToolTransport::Disabled
         } else if let Some(server) = self.dynamic_tool_mcp.as_ref() {
             ThreadToolTransport::Mcp(Arc::clone(server))
         } else {
             ThreadToolTransport::Dynamic
+        };
+        #[cfg(unix)]
+        if let Some(peer) = &self.peer_tools {
+            return ThreadToolTransport::WithPeer(Box::new(transport), Arc::clone(peer));
         }
+        transport
     }
 
     pub(crate) fn with_thread_tool_transport(mut self, transport: ThreadToolTransport) -> Self {
-        if let ThreadToolTransport::Mcp(server) = transport {
+        #[cfg(unix)]
+        {
+            self.peer_tools = transport.peer();
+        }
+        if let Some(server) = transport.task_mcp() {
             self.dynamic_tool_mcp = Some(server);
         }
         self
@@ -1654,6 +1667,12 @@ impl AppServerSession {
     }
 
     pub(crate) async fn shutdown(self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(peer) = &self.peer_tools
+            && Arc::strong_count(peer) == 1
+        {
+            peer.shutdown().await;
+        }
         self.client.shutdown().await
     }
 

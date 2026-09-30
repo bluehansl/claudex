@@ -85,6 +85,22 @@ async fn authenticated_socket_input_is_durable_and_cleanup_is_owned() {
 }
 
 #[tokio::test]
+async fn authenticated_sender_may_omit_optional_process_start() {
+    let (_temp, peer) = start_peer().await;
+    let identity = peer.identity().await;
+    let mut record = serde_json::to_value(&identity).unwrap();
+    record.as_object_mut().unwrap().remove("procStart");
+    crate::registry::write_private_json(&peer.root.join(format!("{}.json", identity.pid)), &record)
+        .unwrap();
+    deliver(&peer, &peer.token, frame(&peer, "optional metadata").await).await;
+    assert_eq!(
+        peer.pending().await.unwrap().unwrap().1.body,
+        "optional metadata"
+    );
+    peer.shutdown().await;
+}
+
+#[tokio::test]
 async fn invalid_auth_and_forged_sender_cannot_enqueue() {
     let (_temp, peer) = start_peer().await;
     deliver(
@@ -124,6 +140,112 @@ async fn socket_permission_mismatch_is_held_until_human_decision() {
         peer.pending().await.unwrap().unwrap().1.body,
         "hold this message"
     );
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn peer_rename_preserves_identity_socket_key_and_pending_message() {
+    let (_temp, peer) = start_peer().await;
+    let before = peer.identity().await;
+    deliver(&peer, &peer.token, frame(&peer, "keep queued").await).await;
+    let key_path = crate::registry::key_path(&peer.root, &before);
+    let key = std::fs::read(&key_path).unwrap();
+    peer.rename("claudex 업데이트").await.unwrap();
+    let after = peer.identity().await;
+    assert_eq!(after.name, "claudex 업데이트");
+    assert_eq!(after.session_id, before.session_id);
+    assert_eq!(after.reference(), before.reference());
+    assert_eq!(after.address(), before.address());
+    assert!(std::fs::read(&key_path).unwrap() == key);
+    assert_eq!(peer.pending().await.unwrap().unwrap().1.body, "keep queued");
+    assert_eq!(
+        crate::registry::resolve(&peer.root, "claudex 업데이트")
+            .await
+            .unwrap()
+            .address(),
+        before.address()
+    );
+    assert!(peer.rename("@invalid").await.is_err());
+    assert_eq!(peer.identity().await.name, "claudex 업데이트");
+    peer.shutdown().await;
+    assert!(!before.messaging_socket_path.exists());
+}
+
+#[tokio::test]
+async fn frontend_record_confirmation_requires_the_exact_admitted_payload() {
+    let (temp, peer) = start_peer().await;
+    deliver(&peer, &peer.token, frame(&peer, "record this").await).await;
+    let (seq, message) = peer.pending().await.unwrap().unwrap();
+    peer.claim(seq, &message).await.unwrap();
+    let database = temp.path().join("state/inbox.sqlite");
+    let mut wrong = message.clone();
+    wrong.body = "not the admitted body".into();
+    assert!(
+        !crate::confirm_external_recorded(&database, &wrong)
+            .await
+            .unwrap()
+    );
+    assert_eq!(peer.processing().await.unwrap().len(), 1);
+    assert!(
+        crate::confirm_external_recorded(&database, &message)
+            .await
+            .unwrap()
+    );
+    assert!(peer.processing().await.unwrap().is_empty());
+    assert_eq!(peer.recorded().await.unwrap(), vec![(seq, message.clone())]);
+    peer.delivered(seq, &message).await.unwrap();
+    assert!(peer.recorded().await.unwrap().is_empty());
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_one_frontend_can_own_a_conversation_and_shutdown_releases_it() {
+    let (temp, first) = start_peer().await;
+    let identity = first.identity().await;
+    let options = || PeerOptions {
+        claude_home: temp.path().join("other-claude"),
+        socket_directory: temp.path().join("other-socks"),
+        inbox_path: temp.path().join("state/inbox.sqlite"),
+        session_id: identity.session_id.clone(),
+        name: "second-terminal".into(),
+        cwd: temp.path().display().to_string(),
+        mode: PermissionMode::Prompting,
+        policy: InboundPolicy::Parity,
+    };
+    assert!(Peer::start(options()).await.is_err());
+    first.shutdown().await;
+    let second = Peer::start(options()).await.unwrap();
+    assert_eq!(second.identity().await.session_id, identity.session_id);
+    second.shutdown().await;
+}
+
+#[tokio::test]
+async fn discovery_accepts_claude_optional_metadata_but_excludes_spare_sessions() {
+    let (_temp, peer) = start_peer().await;
+    let identity = peer.identity().await;
+    let path = peer.root.join(format!("{}.json", identity.pid));
+    let mut record = serde_json::to_value(&identity).unwrap();
+    for field in [
+        "nameSource",
+        "nameSince",
+        "status",
+        "statusUpdatedAt",
+        "updatedAt",
+        "cwd",
+        "version",
+        "entrypoint",
+        "procStart",
+    ] {
+        record.as_object_mut().unwrap().remove(field);
+    }
+    crate::registry::write_private_json(&path, &record).unwrap();
+    let peers = peer.list_sessions().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].name, identity.name);
+    assert_eq!(peers[0].proc_start, identity.proc_start);
+    record["spare"] = json!(true);
+    crate::registry::write_private_json(&path, &record).unwrap();
+    assert!(peer.list_sessions().await.unwrap().is_empty());
     peer.shutdown().await;
 }
 

@@ -39,6 +39,9 @@ impl Inbox {
         let pool = sqlite.open_read_write_pool(path).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS peer_inbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, msg_id TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL, UNIQUE(sender, msg_id))")
             .execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS peer_attempts (seq INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -51,6 +54,9 @@ impl Inbox {
             .await?;
         sqlx::query("DELETE FROM peer_inbox WHERE state = 'delivered' AND seq NOT IN (SELECT seq FROM peer_inbox ORDER BY seq DESC LIMIT 10000)")
             .execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM peer_attempts WHERE seq NOT IN (SELECT seq FROM peer_inbox)")
+            .execute(&mut *tx)
+            .await?;
         let sender = &message.sender_session;
         let exists: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM peer_inbox WHERE sender = ? AND msg_id = ?")
@@ -62,7 +68,7 @@ impl Inbox {
             return Ok("duplicate");
         }
         let limit = if state == "held" { 100 } else { 50 };
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM peer_inbox WHERE state = ? OR (? = 'pending' AND state IN ('released','processing'))")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM peer_inbox WHERE state = ? OR (? = 'pending' AND state IN ('released','processing','recorded'))")
             .bind(state)
             .bind(state).fetch_one(&mut *tx).await?;
         if count >= limit {
@@ -87,7 +93,7 @@ impl Inbox {
     }
 
     pub async fn delivered(&self, seq: i64) -> Result<()> {
-        sqlx::query("UPDATE peer_inbox SET state = 'delivered', payload = '' WHERE seq = ? AND state IN ('pending', 'released', 'processing')")
+        sqlx::query("UPDATE peer_inbox SET state = 'delivered', payload = '' WHERE seq = ? AND state IN ('pending', 'released', 'processing', 'recorded')")
             .bind(seq).execute(&self.pool).await?;
         Ok(())
     }
@@ -140,6 +146,48 @@ impl Inbox {
         .collect()
     }
 
+    pub async fn mark_recorded(&self, seq: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE peer_inbox SET state = 'recorded' WHERE seq = ? AND state = 'processing'",
+        )
+        .bind(seq)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn first_attempt(&self, seq: i64) -> Result<bool> {
+        Ok(
+            sqlx::query("INSERT OR IGNORE INTO peer_attempts(seq) VALUES (?)")
+                .bind(seq)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
+    }
+
+    pub async fn refuse(&self, seq: i64) -> Result<bool> {
+        Ok(sqlx::query("UPDATE peer_inbox SET state = 'denied' WHERE seq = ? AND state IN ('pending','released','processing')")
+            .bind(seq).execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    pub async fn recorded(&self) -> Result<Vec<(i64, ReceivedMessage)>> {
+        sqlx::query(
+            "SELECT seq, payload FROM peer_inbox WHERE state = 'recorded' ORDER BY seq LIMIT 50",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("seq")?,
+                serde_json::from_str(row.try_get("payload")?)?,
+            ))
+        })
+        .collect()
+    }
+
     pub async fn hold(&self, seq: i64) -> Result<()> {
         sqlx::query("UPDATE peer_inbox SET state = 'held' WHERE seq = ? AND state = 'pending'")
             .bind(seq)
@@ -152,7 +200,7 @@ impl Inbox {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if approve {
             let count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM peer_inbox WHERE state IN ('pending', 'released', 'processing')",
+                "SELECT COUNT(*) FROM peer_inbox WHERE state IN ('pending', 'released', 'processing', 'recorded')",
             )
             .fetch_one(&mut *tx)
             .await?;

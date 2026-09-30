@@ -277,6 +277,10 @@ pub(crate) struct AgentsOverviewThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    PeerTick,
+    PeerRosterUpdated(Vec<crate::peer_mentions::PeerMention>),
+    PeerNotice(String),
+    SelectPeer(crate::peer_mentions::PeerMention),
     OpenDaemonMenu,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
     RunDaemonUpdate(crate::update_action::DaemonUpdateSource),

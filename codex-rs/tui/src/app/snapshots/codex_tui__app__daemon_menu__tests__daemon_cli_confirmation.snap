@@ -1,9 +1,9 @@
 ---
 source: tui/src/app/daemon_menu_tests.rs
-expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-build\\bin\\codex\", \"/x/cli-build/bin/codex\")"
+expression: "render_bottom_popup(&app.chat_widget, width).replace(r\"C:\\cli-build\\bin\\codex\", \"/x/cli-build/bin/codex\").replace(env!(\"CARGO_PKG_VERSION\"), \"0.0.0\")"
 ---
   Update daemon and exit Claudex?
-  Use this CLI package v0.159.0 from /x/cli-build/bin/codex. Copy the complete package and use
+  Use this CLI package v0.0.0 from /x/cli-build/bin/codex. Copy the complete package and use
   this location for future local synchronization.
   This may restart the daemon and interrupt active or queued work.
   Claudex exits to update in this terminal. Relaunch it afterward.

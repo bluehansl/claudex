@@ -153,8 +153,19 @@ impl AppServerSession {
             self.remote_cwd_override.as_deref(),
             model_settings,
         );
+        #[cfg(unix)]
+        let peer_attachment = match self.peer_tools.as_ref() {
+            Some(peer) => Some(peer.reserve_attachment(thread_id).await),
+            None => None,
+        };
+        #[cfg(unix)]
+        let owns_peer = peer_attachment
+            .as_ref()
+            .is_some_and(|attachment| attachment.owns);
+        #[cfg(not(unix))]
+        let owns_peer = false;
         self.thread_tool_transport()
-            .configure_mcp(&mut params.config);
+            .configure_resume_mcp(&mut params.config, owns_peer);
         let mut rollout_maintenance_guard = None;
         params.exclude_turns = if self.history_support == ThreadHistorySupport::Paginated {
             let known_legacy_history = self
@@ -214,6 +225,10 @@ impl AppServerSession {
                 ));
             }
         };
+        #[cfg(unix)]
+        if let (Some(peer), Some(attachment)) = (&self.peer_tools, peer_attachment) {
+            peer.commit_attachment(attachment);
+        }
         self.hydrate_initial_thread_history(
             &mut response.thread,
             response.turns_backwards_cursor.clone(),

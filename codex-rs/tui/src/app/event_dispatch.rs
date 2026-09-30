@@ -121,6 +121,17 @@ impl App {
             event => (event, None),
         };
         match event {
+            AppEvent::PeerTick => {
+                #[cfg(unix)]
+                if let Some(peer) = &app_server.peer_tools
+                    && self.chat_widget.thread_id() == self.primary_thread_id
+                    && let Some(context) = self.chat_widget.peer_context() {
+                    peer.update(Some(context));
+                }
+            }
+            AppEvent::PeerRosterUpdated(peers) => self.chat_widget.set_peer_mentions(peers),
+            AppEvent::PeerNotice(message) => self.chat_widget.add_info_message(message, None),
+            AppEvent::SelectPeer(peer) => self.chat_widget.insert_peer_mention(&peer),
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
             AppEvent::ConfirmDaemonUpdate(source) => self.confirm_daemon_update(source),
             AppEvent::RunDaemonUpdate(source) => {

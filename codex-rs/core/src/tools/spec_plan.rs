@@ -1041,6 +1041,12 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
     add_collaboration_tools(context, registry);
     #[cfg(unix)]
     if context.turn_context.config.claude_peer_name.is_some()
+        && !context
+            .turn_context
+            .config
+            .mcp_servers
+            .get()
+            .contains_key("cross_session")
         && matches!(
             context.turn_context.session_source,
             codex_protocol::protocol::SessionSource::Cli
