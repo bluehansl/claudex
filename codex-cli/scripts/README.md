@@ -47,6 +47,7 @@ gh workflow run claudex-platform-packages.yml \
 - root/platform package 이름·버전·플랫폼·optionalDependencies·repository 일치
 - 안전한 tar 경로와 실행 파일 존재/권한
 - 실제 native `--version`, standalone code-mode host 실행, 번들 ripgrep 실행
+- 긴 `CODEX_HOME`에서 daemon start/update/version/stop (일반 updater IPC, `--from-cli` 우회 금지)
 - 격리된 임시 HOME과 모의 Responses API 사용: 개인 OpenAI 인증정보 없이 실행
 - 플랫폼 게시 후 루트 `latest` 게시
 - 정확한 버전과 `latest`의 임시 prefix 설치 및 실행 확인

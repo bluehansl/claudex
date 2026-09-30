@@ -85,17 +85,9 @@ async fn run_managed(
     let mut terminate = Signal;
     #[cfg(windows)]
     let _installer_job = crate::backend::windows::updater_job()?;
-    let socket_path = daemon.manual_update_socket_path();
-    codex_uds::prepare_private_socket_directory(
-        socket_path
-            .parent()
-            .context("updater socket has no parent")?,
-    )
-    .await?;
-    if socket_path.exists() {
-        tokio::fs::remove_file(&socket_path).await?;
-    }
-    let mut listener = Some(codex_uds::UnixListener::bind(&socket_path).await?);
+    let socket_path = daemon.manual_update_socket_path()?;
+    let (bound_listener, _socket_guard) = crate::updater_socket::bind(&socket_path).await?;
+    let mut listener = Some(bound_listener);
     #[cfg(windows)]
     updater.mark_ready().await?;
     let needs_managed_handoff =
@@ -243,7 +235,7 @@ async fn adopt_managed_updater(
             // A failed replacement may still own the PID if its cleanup could
             // not terminate the successor. Never reopen our request socket then.
             replacement.wait_for_ownership().await?;
-            let socket_path = daemon.manual_update_socket_path();
+            let socket_path = daemon.manual_update_socket_path()?;
             if socket_path.exists() {
                 tokio::fs::remove_file(&socket_path).await?;
             }

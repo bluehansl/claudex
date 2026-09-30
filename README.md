@@ -24,6 +24,11 @@ claudex --version
 특정 버전은 `npm install -g @bluehansl/claudex@<version>`으로 설치합니다.
 업데이트 확인은 원본 `@openai/codex`가 아닌 `@bluehansl/claudex`를 기준으로 합니다.
 
+공유 daemon은 이미 실행 중인 버전을 유지할 수 있습니다. 새 CLI를 설치한 뒤
+`claudex app-server daemon version`으로 CLI와 서버 버전을 비교하고, 다르면 새로 실행한
+Claudex의 `/daemon`에서 갱신합니다. 연결된 다른 세션의 작업이 중단될 수 있습니다.
+긴 `CODEX_HOME`의 updater 소켓 오류는 0.159.2에서 수정되었습니다.
+
 ## Claude 세션 연결
 
 로컬 대화형 세션은 Claude Code의 통신 목록에 자동 등록됩니다.

@@ -23,7 +23,7 @@ use crate::managed_install::executable_identity;
 use crate::managed_install::managed_codex_version;
 
 pub(crate) async fn request(daemon: &Daemon) -> Result<UpdateOutput> {
-    let socket_path = daemon.manual_update_socket_path();
+    let socket_path = daemon.manual_update_socket_path()?;
     let mut replacement_deadline = None;
     'request: loop {
         let mut connection = if let Some(deadline) = replacement_deadline {
@@ -81,17 +81,7 @@ pub(crate) async fn request(daemon: &Daemon) -> Result<UpdateOutput> {
                             restore_release,
                         );
                         worker.start().await?;
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                        loop {
-                            if let Ok(connection) = UnixStream::connect(&socket_path).await {
-                                break connection;
-                            }
-                            anyhow::ensure!(
-                                tokio::time::Instant::now() < deadline,
-                                "timed out waiting for the daemon updater to accept a manual request"
-                            );
-                            sleep(Duration::from_millis(50)).await;
-                        }
+                        wait_for_updater(daemon, &worker, &socket_path).await?
                     }
                 }
             }
@@ -140,6 +130,32 @@ pub(crate) async fn request(daemon: &Daemon) -> Result<UpdateOutput> {
             }
         }
         return Ok(outcome);
+    }
+}
+
+pub(super) async fn wait_for_updater(
+    daemon: &Daemon,
+    worker: &crate::backend::PidBackend,
+    socket_path: &std::path::Path,
+) -> Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(connection) = UnixStream::connect(socket_path).await {
+            return Ok(connection);
+        }
+        let running = worker.is_starting_or_running().await?;
+        if !running || tokio::time::Instant::now() >= deadline {
+            let mut message = if running {
+                "timed out waiting for the daemon updater to accept a manual request"
+            } else {
+                "daemon updater exited before accepting a manual request"
+            }
+            .to_string();
+            crate::backend::append_stderr_log_tail_context(&daemon.update_pid_file, &mut message)
+                .await;
+            anyhow::bail!(message);
+        }
+        sleep(Duration::from_millis(50)).await;
     }
 }
 

@@ -36,6 +36,93 @@ fn test_terminate() -> tokio::signal::unix::Signal {
         .expect("install test signal handler")
 }
 
+#[tokio::test]
+async fn long_home_uses_a_bindable_updater_socket() {
+    use std::os::unix::fs::MetadataExt;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let home = tempfile::Builder::new()
+        .prefix(&"Claudex Orca runtime-home 한국어 ".repeat(4))
+        .tempdir_in("/tmp")
+        .expect("long home");
+    let (daemon, _) = manual_update_daemon(&home);
+    let legacy = daemon.update_pid_file.with_extension("sock");
+    assert!(std::os::unix::net::SocketAddr::from_pathname(&legacy).is_err());
+    let path = daemon.manual_update_socket_path().expect("updater path");
+    assert!(
+        std::os::unix::net::SocketAddr::from_pathname(&path).is_ok(),
+        "updater must use a bindable socket even with a long CODEX_HOME"
+    );
+    let (mut listener, guard) = crate::updater_socket::bind(&path)
+        .await
+        .expect("bind updater");
+    assert_eq!(
+        std::fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+    let reply = UpdateOutput {
+        status: UpdateStatus::NoUpdate,
+        managed_codex_path: daemon.managed_codex_bin.clone(),
+        installed_version: Some("1.0.0".into()),
+        running_version: Some("1.0.0".into()),
+        message: "already current".into(),
+    };
+    let expected = reply.clone();
+    let server = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        let mut request = [0; 7];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"update\n");
+        stream
+            .write_all(&serde_json::to_vec(&Ok::<_, String>(reply)).unwrap())
+            .await
+            .unwrap();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::manual_update::request(&daemon),
+    )
+    .await
+    .expect("manual request must not wait for the old long address")
+    .unwrap();
+    assert_eq!(result, expected);
+    server.await.unwrap();
+    drop(guard);
+    assert!(!path.exists(), "owned protected socket must be cleaned up");
+}
+
+#[tokio::test]
+async fn updater_failure_reports_the_actual_log_without_waiting_for_timeout() {
+    let home = tempfile::Builder::new()
+        .prefix("cd-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (daemon, _) = manual_update_daemon(&home);
+    let path = daemon.manual_update_socket_path().unwrap();
+    let worker = crate::backend::PidBackend::new_update_loop(
+        daemon.managed_codex_bin.clone(),
+        daemon.update_pid_file.clone(),
+        None,
+    );
+    std::fs::write(
+        daemon.update_pid_file.with_extension("stderr.log"),
+        "Error: path must be shorter than SUN_LEN\n",
+    )
+    .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::manual_update::wait_for_updater(&daemon, &worker, &path),
+    )
+    .await
+    .expect("exited worker must fail promptly");
+    let message = result.err().expect("missing worker").to_string();
+    assert!(message.contains("exited before accepting"));
+    assert!(message.contains("path must be shorter than SUN_LEN"));
+    assert!(message.contains("daemon-updater.stderr.log"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn manual_request_retries_after_updater_replacement() {
@@ -47,7 +134,7 @@ async fn manual_request_retries_after_updater_replacement() {
         .tempdir_in("/tmp")
         .expect("home");
     let (daemon, _) = manual_update_daemon(&home);
-    let socket_path = daemon.manual_update_socket_path();
+    let socket_path = daemon.manual_update_socket_path().expect("updater path");
     codex_uds::prepare_private_socket_directory(socket_path.parent().expect("socket parent"))
         .await
         .expect("socket directory");
@@ -103,7 +190,7 @@ async fn manual_request_recovers_when_one_shot_updater_exits() {
         .tempdir_in("/tmp")
         .expect("home");
     let (daemon, _) = manual_update_daemon(&home);
-    let socket_path = daemon.manual_update_socket_path();
+    let socket_path = daemon.manual_update_socket_path().expect("updater path");
     codex_uds::prepare_private_socket_directory(socket_path.parent().expect("socket parent"))
         .await
         .expect("socket directory");
@@ -149,7 +236,7 @@ async fn unsupported_request_preserves_updater_schedule() {
     let identity = executable_identity(&daemon.managed_codex_bin)
         .await
         .expect("updater identity");
-    let socket_path = daemon.manual_update_socket_path();
+    let socket_path = daemon.manual_update_socket_path().expect("updater path");
     let updater_daemon = std::sync::Arc::clone(&daemon);
     let worker = tokio::spawn(async move {
         super::run_managed(&updater_daemon, &identity, /*restore_release*/ None).await
@@ -221,6 +308,11 @@ async fn test_control_server(
         .await
         .expect("control listener");
     let codex_home = home.to_path_buf();
+    let initial_manifest =
+        crate::managed_install::package_root(home).join("current/codex-package.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(initial_manifest).unwrap()).unwrap();
+    let mut version = manifest["version"].as_str().unwrap().to_owned();
     tokio::spawn(async move {
         loop {
             let connection = listener.accept().await.expect("control connection");
@@ -234,9 +326,15 @@ async fn test_control_server(
                 .expect("frame");
             let path = crate::managed_install::package_root(&codex_home)
                 .join("current/codex-package.json");
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            let version = manifest["version"].as_str().unwrap();
+            // 선택 링크가 잠시 없어져도 이미 실행 중인 가짜 서버는 마지막 버전을 응답한다.
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    version = manifest["version"].as_str().unwrap().to_owned();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot read mock daemon manifest: {error}"),
+            }
             websocket.send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::json!({"id": 1, "result": {
                     "userAgent": format!("codex_app_server_daemon/{version}"),
@@ -357,15 +455,16 @@ async fn confirmed_feature_restart_preserves_ownership_and_skips_matching_settin
             ("mcp_oauth_refresh_coordination".to_string(), true),
         ]);
         if managed {
-            // Hide the selection without removing the script the spawned shell still needs.
-            let selected_package = daemon.managed_codex_bin.parent().unwrap();
+            // 선택 링크만 숨겨 이미 시작된 shell이 실제 release의 스크립트를 계속 읽게 한다.
+            let selected_package =
+                crate::managed_install::package_root(home.path()).join("current");
             let saved_package = selected_package.with_extension("saved");
-            std::fs::rename(selected_package, &saved_package).unwrap();
+            std::fs::rename(&selected_package, &saved_package).unwrap();
             let error = daemon
                 .restart_with_features_locked(&requested)
                 .await
                 .unwrap_err();
-            std::fs::rename(saved_package, selected_package).unwrap();
+            std::fs::rename(saved_package, &selected_package).unwrap();
             assert!(
                 error.to_string().contains("daemon executable not found"),
                 "{error:#}"

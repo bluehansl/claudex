@@ -35,6 +35,7 @@ mod settings;
 pub mod telemetry;
 mod thread_recovery;
 mod update_loop;
+mod updater_socket;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1008,8 +1009,8 @@ impl Daemon {
         }
     }
 
-    fn manual_update_socket_path(&self) -> PathBuf {
-        self.update_pid_file.with_extension("sock")
+    fn manual_update_socket_path(&self) -> Result<PathBuf> {
+        updater_socket::path(&self.update_pid_file)
     }
 
     async fn load_settings(&self) -> Result<DaemonSettings> {

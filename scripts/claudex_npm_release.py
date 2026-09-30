@@ -265,7 +265,60 @@ stream_max_retries = 0
                 raise ValueError("패키지 외부의 ripgrep을 실행했습니다.")
             if "CLAUDEX_PACKAGE_SMOKE_OK" not in result.stdout:
                 raise ValueError("모의 API turn이 완료되지 않았습니다.")
+        smoke_daemon_long_home(binary, version, root, env)
     print("native version, standalone code-mode host, bundled rg: OK")
+
+
+def smoke_daemon_long_home(binary: Path, version: str, root: Path, env: dict) -> None:
+    home = (
+        root / "Library/Application Support/orca/긴 경로 회귀/codex-runtime-home/home"
+    )
+    state = home / "claudex-app-server-daemon"
+    state.mkdir(parents=True, mode=0o700)
+    if len(os.fsencode(state / "daemon-updater.sock")) < 104:
+        raise ValueError("daemon 회귀 fixture가 Unix socket 경로 제한을 넘지 않습니다.")
+    (state / "settings.json").write_text(
+        json.dumps({"updater": {"autoUpdateEnabled": False}, "shutdownGraceSeconds": 2})
+    )
+    (home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\n'
+        "check_for_update_on_startup = false\n"
+        "[analytics]\nenabled = false\n"
+        "[features]\nplugins = false\napps = false\n"
+    )
+    isolated = {**env, "HOME": str(home), "CODEX_HOME": str(home), "ZDOTDIR": str(home)}
+
+    def command(action: str) -> dict:
+        result = subprocess.run(
+            [str(binary), "app-server", "daemon", action],
+            env=isolated,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode:
+            raise RuntimeError(f"격리된 daemon {action} 실패:\n{result.stderr[-4000:]}")
+        return json.loads(result.stdout)
+
+    try:
+        command("start")
+        # --from-cli 우회가 아닌 실제 수동 updater IPC를 반드시 실행한다.
+        updated = command("update")
+        if updated.get("status") not in {"updated", "noUpdate"} or (
+            updated.get("installedVersion"),
+            updated.get("runningVersion"),
+        ) != (version, version):
+            raise ValueError("긴 CODEX_HOME에서 daemon update 버전 불일치")
+        status = command("version")
+        if any(
+            status.get(key) != version
+            for key in ("cliVersion", "managedCodexVersion", "appServerVersion")
+        ):
+            raise ValueError("daemon CLI/설치/실행 버전 불일치")
+    finally:
+        command("stop")
+    print("long CODEX_HOME daemon start/update/version/stop: OK")
 
 
 def integrity(path: Path) -> str:

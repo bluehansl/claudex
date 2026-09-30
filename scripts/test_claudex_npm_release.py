@@ -66,6 +66,83 @@ class ReleaseTests(unittest.TestCase):
         release.inspect_tarball(self.tarball(), "1.2.3", native=False)
         release.inspect_tarball(self.tarball(native=True), "1.2.3", native=True)
 
+    def test_daemon_smoke_uses_long_isolated_home_and_manual_updater(self):
+        replies = [
+            {},
+            {
+                "status": "noUpdate",
+                "installedVersion": "1.2.3",
+                "runningVersion": "1.2.3",
+            },
+            {
+                "cliVersion": "1.2.3",
+                "managedCodexVersion": "1.2.3",
+                "appServerVersion": "1.2.3",
+            },
+            {},
+        ]
+        with patch.object(
+            release.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess([], 0, json.dumps(reply), "")
+                for reply in replies
+            ],
+        ) as run:
+            release.smoke_daemon_long_home(
+                self.root / "bin/claudex", "1.2.3", self.root, {"PATH": "/usr/bin"}
+            )
+        self.assertEqual(
+            [c.args[0][-1] for c in run.call_args_list],
+            ["start", "update", "version", "stop"],
+        )
+        for call_ in run.call_args_list:
+            self.assertNotIn("--from-cli", call_.args[0])
+            home = Path(call_.kwargs["env"]["CODEX_HOME"])
+            self.assertTrue(home.is_relative_to(self.root))
+            self.assertGreaterEqual(
+                len(
+                    os.fsencode(home / "claudex-app-server-daemon/daemon-updater.sock")
+                ),
+                104,
+            )
+
+    def test_daemon_smoke_stops_after_update_failure(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "{}", ""),
+            subprocess.CompletedProcess([], 1, "", "updater failed"),
+            subprocess.CompletedProcess([], 0, "{}", ""),
+        ]
+        with patch.object(release.subprocess, "run", side_effect=results) as run:
+            with self.assertRaisesRegex(RuntimeError, "updater failed"):
+                release.smoke_daemon_long_home(
+                    self.root / "bin/claudex", "1.2.3", self.root, {}
+                )
+        self.assertEqual(run.call_args_list[-1].args[0][-1], "stop")
+
+    def test_daemon_smoke_rejects_old_running_version(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "{}", ""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                json.dumps(
+                    {
+                        "status": "updated",
+                        "installedVersion": "1.2.3",
+                        "runningVersion": "1.2.2",
+                    }
+                ),
+                "",
+            ),
+            subprocess.CompletedProcess([], 0, "{}", ""),
+        ]
+        with patch.object(release.subprocess, "run", side_effect=results):
+            with self.assertRaisesRegex(ValueError, "버전 불일치"):
+                release.smoke_daemon_long_home(
+                    self.root / "bin/claudex", "1.2.3", self.root, {}
+                )
+
     def test_mock_harness_loads_with_standard_library_only(self):
         directory = str(release.REPO_ROOT / "sdk/python/tests")
         subprocess.run(
