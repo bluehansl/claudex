@@ -84,17 +84,32 @@ impl Inbox {
     pub async fn pending(&self) -> Result<Option<(i64, ReceivedMessage)>> {
         let row = sqlx::query("SELECT seq, payload, state FROM peer_inbox WHERE state IN ('pending', 'released') ORDER BY seq LIMIT 1")
             .fetch_optional(&self.pool).await?;
-        row.map(|row| {
-            let mut message: ReceivedMessage = serde_json::from_str(row.try_get("payload")?)?;
-            message.approval_released |= row.try_get::<&str, _>("state")? == "released";
-            Ok((row.try_get("seq")?, message))
-        })
-        .transpose()
+        let pending: Option<(i64, ReceivedMessage)> = row
+            .map(|row| -> Result<_> {
+                let mut message: ReceivedMessage = serde_json::from_str(row.try_get("payload")?)?;
+                message.approval_released |= row.try_get::<&str, _>("state")? == "released";
+                Ok((row.try_get("seq")?, message))
+            })
+            .transpose()?;
+        if let Some((seq, message)) = &pending {
+            tracing::trace!(
+                seq,
+                message_id = %message.id,
+                "claude peer inbox selected a pending message"
+            );
+        }
+        Ok(pending)
     }
 
     pub async fn delivered(&self, seq: i64) -> Result<()> {
-        sqlx::query("UPDATE peer_inbox SET state = 'delivered', payload = '' WHERE seq = ? AND state IN ('pending', 'released', 'processing', 'recorded')")
-            .bind(seq).execute(&self.pool).await?;
+        let affected = sqlx::query("UPDATE peer_inbox SET state = 'delivered', payload = '' WHERE seq = ? AND state IN ('pending', 'released', 'processing', 'recorded')")
+            .bind(seq).execute(&self.pool).await?.rows_affected();
+        tracing::debug!(
+            seq,
+            affected,
+            state = "delivered",
+            "claude peer inbox state changed"
+        );
         Ok(())
     }
 
@@ -115,18 +130,26 @@ impl Inbox {
     }
 
     pub async fn claim(&self, seq: i64, message: &ReceivedMessage) -> Result<()> {
-        sqlx::query("UPDATE peer_inbox SET state = 'processing', payload = ? WHERE seq = ? AND state IN ('pending','released')")
-            .bind(serde_json::to_string(message)?).bind(seq).execute(&self.pool).await?;
+        let affected = sqlx::query("UPDATE peer_inbox SET state = 'processing', payload = ? WHERE seq = ? AND state IN ('pending','released')")
+            .bind(serde_json::to_string(message)?).bind(seq).execute(&self.pool).await?.rows_affected();
+        tracing::debug!(seq, message_id = %message.id, affected, state = "processing", "claude peer inbox state changed");
         Ok(())
     }
 
     pub async fn release(&self, seq: i64) -> Result<()> {
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE peer_inbox SET state = 'pending' WHERE seq = ? AND state = 'processing'",
         )
         .bind(seq)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        tracing::debug!(
+            seq,
+            affected,
+            state = "pending",
+            "claude peer inbox state changed"
+        );
         Ok(())
     }
 
@@ -147,12 +170,19 @@ impl Inbox {
     }
 
     pub async fn mark_recorded(&self, seq: i64) -> Result<()> {
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE peer_inbox SET state = 'recorded' WHERE seq = ? AND state = 'processing'",
         )
         .bind(seq)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        tracing::debug!(
+            seq,
+            affected,
+            state = "recorded",
+            "claude peer inbox state changed"
+        );
         Ok(())
     }
 

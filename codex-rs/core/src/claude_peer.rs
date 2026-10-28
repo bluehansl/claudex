@@ -163,7 +163,20 @@ pub async fn submit_external(
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::ResponseItem;
     let config = thread.config().await;
+    tracing::debug!(
+        thread_id = %thread.session.thread_id,
+        message_id = %message.id,
+        "claude peer core received external delivery"
+    );
     if config.ephemeral || !config.mcp_servers.get().contains_key("cross_session") {
+        tracing::debug!(
+            thread_id = %thread.session.thread_id,
+            message_id = %message.id,
+            ephemeral = config.ephemeral,
+            cross_session_configured = config.mcp_servers.get().contains_key("cross_session"),
+            gate = "unavailable",
+            "claude peer core rejected external delivery"
+        );
         return Err(ExternalPeerError::Unavailable);
     }
     thread
@@ -178,15 +191,27 @@ pub async fn submit_external(
     let pending = codex_claude_peer::external_processing(&database)
         .await
         .map_err(ExternalPeerError::Temporary)?;
-    let (seq, _) = pending
-        .iter()
-        .find(|(_, stored)| stored == &message)
-        .ok_or(ExternalPeerError::NotAdmitted)?;
+    let Some((seq, _)) = pending.iter().find(|(_, stored)| stored == &message) else {
+        tracing::debug!(
+            thread_id = %thread.session.thread_id,
+            message_id = %message.id,
+            gate = "not_admitted",
+            "claude peer core rejected external delivery"
+        );
+        return Err(ExternalPeerError::NotAdmitted);
+    };
     let first_attempt = codex_claude_peer::first_external_attempt(&database, *seq)
         .await
         .map_err(ExternalPeerError::Temporary)?;
     if !first_attempt {
         if thread.session.active_turn.lock().await.is_some() {
+            tracing::debug!(
+                thread_id = %thread.session.thread_id,
+                message_id = %message.id,
+                seq = *seq,
+                gate = "active_turn",
+                "claude peer core deferred repeated external delivery"
+            );
             return Ok(StartIfIdleSubmission::NotSubmitted {
                 reason: codex_protocol::turn_input::NotSubmittedReason::NotIdle,
             });
@@ -200,6 +225,12 @@ pub async fn submit_external(
             codex_history::RolloutItem::ResponseItem(item) if external_message(&item.item).as_ref() == Some(&message))) {
             thread.session.flush_rollout().await.map_err(|error| ExternalPeerError::Temporary(error.into()))?;
             codex_claude_peer::confirm_external_recorded(&database, &message).await.map_err(ExternalPeerError::Temporary)?;
+            tracing::debug!(
+                thread_id = %thread.session.thread_id,
+                message_id = %message.id,
+                seq = *seq,
+                "claude peer core confirmed an already-recorded external delivery"
+            );
             return Ok(StartIfIdleSubmission::NotSubmitted { reason: codex_protocol::turn_input::NotSubmittedReason::Superseded });
         }
     }
@@ -233,6 +264,28 @@ pub async fn submit_external(
             }),
         )
         .await;
+    match &result {
+        Ok(StartIfIdleSubmission::Started { .. }) => tracing::debug!(
+            thread_id = %thread.session.thread_id,
+            message_id = %message.id,
+            seq = *seq,
+            "claude peer core started an external delivery turn"
+        ),
+        Ok(StartIfIdleSubmission::NotSubmitted { reason }) => tracing::debug!(
+            thread_id = %thread.session.thread_id,
+            message_id = %message.id,
+            seq = *seq,
+            ?reason,
+            "claude peer core did not start an external delivery turn"
+        ),
+        Err(error) => tracing::warn!(
+            thread_id = %thread.session.thread_id,
+            message_id = %message.id,
+            seq = *seq,
+            %error,
+            "claude peer core external delivery failed"
+        ),
+    }
     result.map_err(|error| ExternalPeerError::Temporary(error.into()))
 }
 

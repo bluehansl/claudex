@@ -151,6 +151,7 @@ pub(crate) fn matching_home(
 impl PeerServer {
     pub(crate) async fn reserve_attachment(&self, thread_id: ThreadId) -> PeerAttachment {
         if self.controller.cancel.is_cancelled() {
+            tracing::debug!(%thread_id, "claude peer attachment skipped because the frontend is closing");
             return PeerAttachment {
                 owns: false,
                 thread_id,
@@ -162,6 +163,7 @@ impl PeerServer {
             && !peer.is_closed()
             && peer.identity().await.session_id == thread_id.to_string()
         {
+            tracing::debug!(%thread_id, "claude peer attachment reused the frontend-owned peer");
             return PeerAttachment {
                 owns: true,
                 thread_id,
@@ -175,12 +177,16 @@ impl PeerServer {
             .join("claude-peer")
             .join(format!("{thread_id}.sqlite"));
         match PeerOwnership::acquire(path.as_path()) {
-            Ok(owner) => PeerAttachment {
-                owns: true,
-                thread_id,
-                owner: Some(owner),
-            },
-            Err(_) => {
+            Ok(owner) => {
+                tracing::debug!(%thread_id, "claude peer attachment reserved inbox ownership");
+                PeerAttachment {
+                    owns: true,
+                    thread_id,
+                    owner: Some(owner),
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%thread_id, %error, "claude peer attachment observed another owner");
                 self.controller.events.send(AppEvent::PeerNotice("Another terminal owns messaging for this conversation; its connection was preserved.".into()));
                 PeerAttachment {
                     owns: false,
@@ -192,12 +198,22 @@ impl PeerServer {
     }
 
     pub(crate) fn commit_attachment(&self, mut attachment: PeerAttachment) {
+        let thread_id = attachment.thread_id;
+        let owns = attachment.owns;
+        let reserved_owner = attachment.owner.is_some();
         *self
             .controller
             .observer_thread
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             (!attachment.owns).then_some(attachment.thread_id);
+        tracing::debug!(
+            %thread_id,
+            owns,
+            reserved_owner,
+            observer = !owns,
+            "claude peer attachment committed"
+        );
         if let Some(owner) = attachment.owner.take() {
             *self
                 .controller
@@ -209,7 +225,7 @@ impl PeerServer {
     }
 
     pub(crate) fn update_status(&self, thread_id: ThreadId, busy: bool) {
-        self.controller.context.send_if_modified(|context| {
+        let changed = self.controller.context.send_if_modified(|context| {
             let Some(context) = context else {
                 return false;
             };
@@ -219,6 +235,9 @@ impl PeerServer {
             context.busy = busy;
             true
         });
+        if changed {
+            tracing::debug!(%thread_id, busy, "claude peer frontend status changed");
+        }
     }
 
     pub(crate) fn update_permissions(&self, thread_id: ThreadId, mode: PermissionMode) {
@@ -375,6 +394,7 @@ impl PeerServer {
             .connection
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connection);
+        tracing::debug!("claude peer frontend reattached the app-server request handle");
     }
 
     pub(crate) fn suspend(&self) {
@@ -383,6 +403,7 @@ impl PeerServer {
             .connection
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        tracing::debug!("claude peer frontend suspended the app-server request handle");
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -431,6 +452,7 @@ impl Controller {
     }
 
     async fn run(self: Arc<Self>) {
+        tracing::debug!("claude peer frontend delivery monitor started");
         let mut changes = self.context.subscribe();
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -440,9 +462,17 @@ impl Controller {
         let mut last_error = String::new();
         loop {
             tokio::select! {
-                _ = self.cancel.cancelled() => break,
+                _ = self.cancel.cancelled() => {
+                    tracing::debug!("claude peer frontend delivery monitor was cancelled");
+                    break;
+                },
                 _ = interval.tick() => {},
-                result = changes.changed() => { if result.is_err() { break; } },
+                result = changes.changed() => {
+                    if result.is_err() {
+                        tracing::warn!("claude peer frontend context channel closed");
+                        break;
+                    }
+                },
             }
             self.events.send(AppEvent::PeerTick);
             if Instant::now() >= next_roster {
@@ -479,6 +509,7 @@ impl Controller {
             }
             let result = self.step(&mut retry).await;
             if let Err(error) = result {
+                tracing::warn!(%error, "claude peer frontend delivery step failed");
                 next_step = Instant::now() + Duration::from_secs(5);
                 let message = error.to_string();
                 if message != last_error {
@@ -497,6 +528,7 @@ impl Controller {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        tracing::debug!("claude peer frontend delivery monitor stopped");
     }
 
     #[expect(
@@ -505,12 +537,26 @@ impl Controller {
     )]
     async fn step(&self, retry: &mut RetryState) -> Result<()> {
         let Some(context) = self.context() else {
+            tracing::trace!(gate = "no_context", "claude peer delivery skipped");
             let peer = self.peer.lock().await.take();
             if let Some(peer) = peer {
                 peer.shutdown().await;
             }
             return Ok(());
         };
+        let retry_after_ms = retry
+            .next
+            .saturating_duration_since(Instant::now())
+            .as_millis();
+        let connection_present = self.connection().is_some();
+        tracing::trace!(
+            thread_id = %context.thread_id,
+            busy = context.busy,
+            can_receive = context.can_receive,
+            connection_present,
+            retry_after_ms,
+            "claude peer delivery step"
+        );
         let mut slot = self.peer.lock().await;
         if let Some(peer) = slot.as_ref()
             && peer.identity().await.session_id != context.thread_id.to_string()
@@ -526,6 +572,11 @@ impl Controller {
             .as_ref()
             == Some(&context.thread_id)
         {
+            tracing::trace!(
+                thread_id = %context.thread_id,
+                gate = "observer_thread",
+                "claude peer delivery skipped"
+            );
             return Ok(());
         }
         if slot.is_none() {
@@ -569,10 +620,16 @@ impl Controller {
                     None
                 }
             };
+            let used_reserved_owner = owner.is_some();
             *slot = Some(match owner {
                 Some(owner) => Peer::start_owned(options, owner).await?,
                 None => Peer::start(options).await?,
             });
+            tracing::debug!(
+                thread_id = %context.thread_id,
+                used_reserved_owner,
+                "claude peer frontend started the conversation peer"
+            );
         }
         let peer = Arc::clone(slot.as_ref().context("peer unavailable")?);
         drop(slot);
@@ -591,20 +648,59 @@ impl Controller {
             )));
         }
         if !context.can_receive || context.busy || Instant::now() < retry.next {
+            tracing::trace!(
+                thread_id = %context.thread_id,
+                gate = "not_ready",
+                busy = context.busy,
+                can_receive = context.can_receive,
+                retry_after_ms,
+                "claude peer delivery skipped"
+            );
             return Ok(());
         }
         let Some(connection) = self.connection() else {
+            tracing::trace!(
+                thread_id = %context.thread_id,
+                gate = "no_connection",
+                "claude peer delivery skipped"
+            );
             return Ok(());
         };
         let processing = peer.processing().await?.into_iter().next();
         let recovering = processing.is_some();
         let Some((seq, message)) = processing.or(peer.pending().await?) else {
+            tracing::trace!(
+                thread_id = %context.thread_id,
+                gate = "no_message",
+                "claude peer delivery skipped"
+            );
             return Ok(());
         };
+        tracing::debug!(
+            thread_id = %context.thread_id,
+            seq,
+            message_id = %message.id,
+            recovering,
+            "claude peer delivery selected a message"
+        );
         if !recovering && !peer.revalidate(seq, &message, context.mode).await? {
+            tracing::debug!(
+                thread_id = %context.thread_id,
+                seq,
+                message_id = %message.id,
+                gate = "admission_revalidation",
+                "claude peer delivery skipped"
+            );
             return Ok(());
         }
         if self.context().as_ref() != Some(&context) || self.cancel.is_cancelled() {
+            tracing::debug!(
+                thread_id = %context.thread_id,
+                seq,
+                message_id = %message.id,
+                gate = "context_changed",
+                "claude peer delivery skipped"
+            );
             return Ok(());
         }
         if !recovering {
@@ -631,9 +727,29 @@ impl Controller {
             params,
         });
         match tokio::time::timeout(Duration::from_secs(10), request).await {
-            Ok(Ok(_)) => {} // rollout 기록 확인은 Core가 같은 inbox에 남긴다.
+            Ok(Ok(_)) => {
+                tracing::debug!(
+                    thread_id = %context.thread_id,
+                    seq,
+                    message_id = %message.id,
+                    "claude peer delivery submitted TurnStart"
+                );
+            } // rollout 기록 확인은 Core가 같은 inbox에 남긴다.
             Ok(Err(TypedRequestError::Server { source, .. })) => {
-                match source.data.as_ref().and_then(|data| data.get("claudex_peer_retryable")).and_then(Value::as_bool) {
+                let retryable = source
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("claudex_peer_retryable"))
+                    .and_then(Value::as_bool);
+                tracing::warn!(
+                    thread_id = %context.thread_id,
+                    seq,
+                    message_id = %message.id,
+                    ?retryable,
+                    error = %source.message,
+                    "claude peer delivery TurnStart was rejected"
+                );
+                match retryable {
                     Some(true) => peer.release(seq).await?,
                     Some(false) => {
                         peer.refuse(seq, &message, "receiver rejected this message").await?;
@@ -643,7 +759,14 @@ impl Controller {
                     None => {},
                 }
             }
-            _ => {
+            result => {
+                tracing::warn!(
+                    thread_id = %context.thread_id,
+                    seq,
+                    message_id = %message.id,
+                    ?result,
+                    "claude peer delivery TurnStart could not be confirmed"
+                );
                 if retry.attempts == 1 {
                     self.events.send(AppEvent::PeerNotice(
                     "Peer delivery could not be confirmed; the message is retained for recovery."
