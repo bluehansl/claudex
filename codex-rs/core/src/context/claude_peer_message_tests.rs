@@ -21,11 +21,5 @@ fn peer_context_matches_assistant_api_contract_without_user_authority() {
     let codex_protocol::models::ResponseItem::Message { role, content, .. } = item else {
         panic!("message expected");
     };
-    assert_eq!(
-        (role, content),
-        (
-            "assistant".into(),
-            vec![ContentItem::OutputText { text: expected }]
-        )
-    );
+    assert_eq!((role, content), ("assistant".into(), vec![expected]));
 }

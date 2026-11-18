@@ -5,6 +5,8 @@ use crate::legacy_core::config::ConfigBuilder;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
 use app_test_support::rollout_path;
+use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::ServerNotification;
 use codex_protocol::ThreadId;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -125,6 +127,7 @@ async fn call_tool(
             ephemeral: Some(true),
             ..ThreadStartParams::default()
         },
+        Features::with_defaults(),
         status_receiver,
         /*app_event_tx*/ None,
     )
@@ -235,7 +238,7 @@ stream_max_retries = 0
     assert_eq!(expected["page"]["order"], "newest_first");
     tokio::time::timeout(Duration::from_secs(/*secs*/ 30), async {
         while let Some(event) = model_server.next_event().await {
-            match event {
+            match event.event {
                 codex_app_server_client::AppServerEvent::ServerRequest(request) => {
                     if let codex_app_server_protocol::ServerRequest::DynamicToolCall {
                         request_id,
@@ -255,6 +258,8 @@ stream_max_retries = 0
                         return Ok::<_, color_eyre::eyre::Report>(());
                     }
                 }
+                codex_app_server_client::AppServerEvent::ThreadStreamReconnected(_)
+                | codex_app_server_client::AppServerEvent::ThreadStreamDisconnected(_) => {}
                 codex_app_server_client::AppServerEvent::Lagged { .. }
                 | codex_app_server_client::AppServerEvent::Disconnected { .. } => {
                     panic!("lost app-server events during the tool round trip");
@@ -395,6 +400,45 @@ fn activity_metadata_is_retained_without_including_outputs() -> color_eyre::Resu
     assert_eq!(
         no_outputs["items"][8]["result"],
         json!({"text": "", "truncated": true, "originalChars": 11})
+    );
+    Ok(())
+}
+
+/// File-backed generated images retain their reference when task output is requested without
+/// exposing that output when the caller asks for metadata only.
+#[test]
+fn file_backed_image_generation_is_retained_as_a_reference() -> color_eyre::Result<()> {
+    let turn: Turn = serde_json::from_value(json!({
+        "id": "turn-1",
+        "status": "completed",
+        "items": [{
+            "type": "imageGeneration",
+            "id": "image-1",
+            "status": "completed",
+            "fileId": "file-generated-image"
+        }]
+    }))?;
+
+    assert_eq!(
+        turn_summary(&turn, /*include_outputs*/ true, DEFAULT_OUTPUT_CHARS)["items"][0],
+        json!({
+            "type": "imageGeneration",
+            "id": "image-1",
+            "status": "completed",
+            "revisedPrompt": null,
+            "savedPath": null,
+            "fileId": "file-generated-image"
+        })
+    );
+    assert_eq!(
+        turn_summary(&turn, /*include_outputs*/ false, DEFAULT_OUTPUT_CHARS)["items"][0],
+        json!({
+            "type": "imageGeneration",
+            "id": "image-1",
+            "status": "completed",
+            "revisedPrompt": null,
+            "savedPath": null
+        })
     );
     Ok(())
 }
@@ -666,7 +710,7 @@ async fn wait_threads_preserves_snapshots_and_rejects_self_wait() -> color_eyre:
 
 #[tokio::test]
 async fn task_creation_and_followup_start_background_turns() -> color_eyre::Result<()> {
-    let (_codex_home, server, source, target) = test_server(json!({})).await?;
+    let (codex_home, mut server, source, target) = test_server(json!({})).await?;
 
     for (tool, arguments) in [
         (
@@ -712,6 +756,36 @@ async fn task_creation_and_followup_start_background_turns() -> color_eyre::Resu
     .await;
     assert!(!rejected.success);
 
+    let inherited_sandbox = codex_app_server_protocol::SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![
+            codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(codex_home.path())?,
+        ],
+        network_access: true,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    request::<codex_app_server_protocol::ThreadSettingsUpdateResponse>(
+        &server.request_handle(),
+        |request_id| ClientRequest::ThreadSettingsUpdate {
+            request_id,
+            params: codex_app_server_protocol::ThreadSettingsUpdateParams {
+                thread_id: target.clone(),
+                sandbox_policy: Some(inherited_sandbox.clone()),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .map_err(color_eyre::eyre::Error::msg)?;
+    while let Some(event) = server.next_event().await {
+        if let AppServerEvent::ServerNotification(notification) = event.event
+            && matches!(*notification, ServerNotification::ThreadSettingsUpdated(ref update)
+                if update.thread_id == target && update.thread_settings.sandbox_policy == inherited_sandbox)
+        {
+            break;
+        }
+    }
+
     let created = response_json(
         call_tool(
             &server,
@@ -722,6 +796,21 @@ async fn task_creation_and_followup_start_background_turns() -> color_eyre::Resu
         .await,
     );
     assert!(created["threadId"].is_string());
+    let child: ThreadResumeResponse = request(&server.request_handle(), |request_id| {
+        ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: created["threadId"]
+                    .as_str()
+                    .expect("created thread id")
+                    .to_string(),
+                ..Default::default()
+            },
+        }
+    })
+    .await
+    .map_err(color_eyre::eyre::Error::msg)?;
+    assert_eq!(child.sandbox, inherited_sandbox);
 
     let continued = response_json(
         call_tool(

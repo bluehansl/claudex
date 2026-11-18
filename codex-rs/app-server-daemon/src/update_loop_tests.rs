@@ -395,9 +395,9 @@ async fn daemon_start_and_restart_preserve_launch_features() {
             features
         );
         let expected = if features.is_empty() {
-            "app-server\n--listen\nunix://\n--managed-daemon\n"
+            "app-server\n--listen\nunix://\n--analytics-default-enabled\n--managed-daemon\n"
         } else {
-            "app-server\n--listen\nunix://\n-c\nfeatures.api_key_model_discovery=true\n-c\nfeatures.code_mode_host=false\n--managed-daemon\n"
+            "app-server\n--listen\nunix://\n--analytics-default-enabled\n-c\nfeatures.api_key_model_discovery=true\n-c\nfeatures.code_mode_host=false\n--managed-daemon\n"
         };
         assert_eq!(std::fs::read_to_string(&args_path).unwrap(), expected);
         let reused = daemon
@@ -414,7 +414,7 @@ async fn daemon_start_and_restart_preserve_launch_features() {
         );
         assert_eq!(std::fs::read_to_string(&args_path).unwrap(), expected);
         std::fs::remove_file(&args_path).unwrap();
-        let restarted = daemon.restart().await;
+        let restarted = daemon.restart(&std::collections::BTreeMap::new()).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 10);
         while std::fs::read_to_string(&args_path).ok().as_deref() != Some(expected)
             && tokio::time::Instant::now() < deadline

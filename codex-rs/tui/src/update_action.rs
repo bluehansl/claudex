@@ -2,7 +2,7 @@
 use codex_install_context::InstallContext;
 #[cfg(any(not(debug_assertions), test))]
 use codex_install_context::InstallMethod;
-#[cfg(test)]
+#[cfg(any(not(debug_assertions), test))]
 use codex_install_context::StandalonePlatform;
 
 /// Update action the CLI should perform after the TUI exits.
@@ -20,7 +20,7 @@ pub enum UpdateAction {
     PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
-    /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`.
+    /// Update via the standalone Unix installer.
     StandaloneUnix,
     /// Update via `$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex`.
     StandaloneWindows,
@@ -51,7 +51,7 @@ impl UpdateAction {
                 "sh",
                 &[
                     "-c",
-                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
+                    r#"s=$(curl -fsSL https://chatgpt.com/codex/install.sh) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
                 ],
             ),
             UpdateAction::StandaloneWindows => (
@@ -151,17 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_update_commands_rerun_latest_installer() {
-        assert_eq!(
-            UpdateAction::StandaloneUnix.command_args(),
-            (
-                "sh",
-                &[
-                    "-c",
-                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
-                ][..],
-            )
-        );
+    fn standalone_windows_update_command_reruns_latest_installer() {
         assert_eq!(
             UpdateAction::StandaloneWindows.command_args(),
             (
@@ -174,6 +164,23 @@ mod tests {
                 ][..],
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_unix_update_fails_when_installer_download_fails() {
+        let (command, args) = UpdateAction::StandaloneUnix.command_args();
+        let offline_command = args[1].replace("https://chatgpt.com", "file:///dev/null");
+        assert_ne!(offline_command, args[1], "installer URL must be replaced");
+        let output = std::process::Command::new(command)
+            .args([args[0], &offline_command])
+            .env_clear()
+            .env("HOME", "/dev/null")
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run standalone Unix update command");
+
+        assert!(!output.status.success(), "{output:?}");
     }
 
     #[test]

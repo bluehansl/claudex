@@ -29,12 +29,13 @@ impl Inbox {
                 && metadata.mode() & 0o077 == 0,
             "peer database permissions are invalid"
         );
-        let sqlite = codex_state::SqliteConfig::from_sqlite_home(
+        let sqlite = codex_state::SqliteConfig::from_sqlite_home_with_nfs_enforcement(
             codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
                 path.parent()
                     .context("peer store needs parent")?
                     .canonicalize()?,
             )?,
+            /*enforce_delete_on_nfs*/ false,
         );
         let pool = sqlite.open_read_write_pool(path).await?;
         sqlx::query("CREATE TABLE IF NOT EXISTS peer_inbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, msg_id TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL, UNIQUE(sender, msg_id))")

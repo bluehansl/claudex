@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
+import { constants } from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -72,52 +73,44 @@ if (!platformPackage) {
   throw new Error(`Unsupported target triple: ${targetTriple}`);
 }
 
-const claudexBinaryName = process.platform === "win32" ? "claudex.exe" : "claudex";
-const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
-const localVendorRoot = path.join(__dirname, "..", "vendor");
-const packageBinaryPaths = (vendorRoot) => [
-  path.join(vendorRoot, targetTriple, "bin", claudexBinaryName),
-  path.join(vendorRoot, targetTriple, "bin", codexBinaryName),
-];
-const legacyBinaryPaths = (vendorRoot) => [
-  path.join(vendorRoot, targetTriple, "codex", claudexBinaryName),
-  path.join(vendorRoot, targetTriple, "codex", codexBinaryName),
-];
-
 function resolveNativePackage(vendorRoot) {
   const packageRoot = path.join(vendorRoot, targetTriple);
-  for (const binaryPath of packageBinaryPaths(vendorRoot)) {
+  const binaryNames =
+    process.platform === "win32"
+      ? ["claudex.exe", "codex.exe"]
+      : ["claudex", "codex"];
+
+  for (const binaryName of binaryNames) {
+    const binaryPath = path.join(packageRoot, "bin", binaryName);
     if (existsSync(binaryPath)) {
-      return {
-        binaryPath,
-        pathDir: path.join(packageRoot, "codex-path"),
-      };
+      return { binaryPath, pathDir: path.join(packageRoot, "codex-path") };
     }
   }
 
-  for (const legacyPath of legacyBinaryPaths(vendorRoot)) {
-    if (existsSync(legacyPath)) {
-      return {
-        binaryPath: legacyPath,
-        pathDir: path.join(packageRoot, "path"),
-      };
+  for (const binaryName of binaryNames) {
+    const binaryPath = path.join(packageRoot, "codex", binaryName);
+    if (existsSync(binaryPath)) {
+      return { binaryPath, pathDir: path.join(packageRoot, "path") };
     }
   }
 
   return null;
 }
 
-let nativePackage;
-try {
-  const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
-  nativePackage = resolveNativePackage(
-    path.join(path.dirname(packageJsonPath), "vendor"),
-  );
-} catch {
-  nativePackage = resolveNativePackage(localVendorRoot);
-}
+function findClaudexExecutable() {
+  let vendorRoot;
+  try {
+    const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
+    vendorRoot = path.join(path.dirname(packageJsonPath), "vendor");
+  } catch {
+    vendorRoot = path.join(__dirname, "..", "vendor");
+  }
 
-if (!nativePackage) {
+  const nativePackage = resolveNativePackage(vendorRoot);
+  if (nativePackage) {
+    return nativePackage;
+  }
+
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
@@ -132,23 +125,7 @@ if (!nativePackage) {
   );
 }
 
-const { binaryPath, pathDir } = nativePackage;
-
-// Use an asynchronous spawn instead of spawnSync so that Node is able to
-// respond to signals (e.g. Ctrl-C / SIGINT) while the native binary is
-// executing. This allows us to forward those signals to the child process
-// and guarantees that when either the child terminates or the parent
-// receives a fatal signal, both processes exit in a predictable manner.
-
-function getUpdatedPath(newDirs) {
-  const pathSep = process.platform === "win32" ? ";" : ":";
-  const existingPath = process.env.PATH || "";
-  const updatedPath = [
-    ...newDirs,
-    ...existingPath.split(pathSep).filter(Boolean),
-  ].join(pathSep);
-  return updatedPath;
-}
+const { binaryPath, pathDir } = findClaudexExecutable();
 
 function isPnpmOwnedCodexInstall(nodeModulesDir) {
   if (!existsSync(path.join(nodeModulesDir, ".modules.yaml"))) {
@@ -201,7 +178,7 @@ function isVitePlusOwnedClaudexInstall(packagesDir) {
       }
     }
   } catch {
-    // Missing or unreadable ownership metadata must not prevent Codex starting.
+    // Missing or unreadable ownership metadata must not prevent Claudex starting.
   }
   return false;
 }
@@ -264,14 +241,13 @@ const packageManagerEnvVar =
       : packageManager === "vite-plus"
         ? "CODEX_MANAGED_BY_VITE_PLUS"
         : "CODEX_MANAGED_BY_NPM";
-const additionalDirs = [];
-if (existsSync(pathDir)) {
-  additionalDirs.push(pathDir);
-}
-const updatedPath = getUpdatedPath(additionalDirs);
+const pathSep = process.platform === "win32" ? ";" : ":";
+const additionalDirs = existsSync(pathDir) ? [pathDir] : [];
 const env = {
   ...process.env,
-  PATH: updatedPath,
+  PATH: [...additionalDirs, ...(process.env.PATH || "").split(pathSep).filter(Boolean)].join(
+    pathSep,
+  ),
   CODEX_MANAGED_PACKAGE_ROOT: codexPackageRoot,
 };
 delete env.CODEX_MANAGED_BY_NPM;
@@ -280,6 +256,17 @@ delete env.CODEX_MANAGED_BY_PNPM;
 delete env.CODEX_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
 
+// Replace Node so the native binary receives signals and exits directly.
+// Node exposes execve on Windows too, but calling it there is unsupported.
+if (process.platform !== "win32" && typeof process.execve === "function") {
+  // Node ignores SIGXFSZ, and ignored signals survive execve. Installing a
+  // handler lets execve restore the default disposition in the native binary.
+  process.on("SIGXFSZ", () => {});
+  process.execve(binaryPath, [binaryPath, ...process.argv.slice(2)], env);
+}
+
+// Older Node versions and Windows need a child process. Spawn asynchronously
+// so Node can forward signals while the native binary is executing.
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   env,
@@ -329,8 +316,9 @@ const childResult = await new Promise((resolve) => {
 });
 
 if (childResult.type === "signal") {
-  // Re-emit the same signal so that the parent terminates with the expected
-  // semantics (this also sets the correct exit code of 128 + n).
+  // Preserve a failure exit code even if Node ignores the re-emitted signal.
+  process.exitCode = 128 + constants.signals[childResult.signal];
+  process.removeAllListeners(childResult.signal);
   process.kill(process.pid, childResult.signal);
 } else {
   process.exit(childResult.exitCode);

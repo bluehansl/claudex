@@ -251,9 +251,7 @@ fn is_recorded_message(
 ) -> bool {
     let expected = ClaudePeerMessage(message.clone()).render();
     matches!(item, codex_protocol::models::ResponseItem::Message { role, content, .. }
-        if role == "assistant" && content.iter().any(|part| matches!(part,
-            codex_protocol::models::ContentItem::InputText { text }
-                | codex_protocol::models::ContentItem::OutputText { text } if text == &expected)))
+        if role == "assistant" && content.iter().any(|part| part == &expected))
 }
 
 pub(crate) async fn confirm_recorded(

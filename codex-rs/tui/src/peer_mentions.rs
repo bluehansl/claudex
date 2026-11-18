@@ -108,7 +108,7 @@ mod tests {
         };
         assert!(text.contains("00000000-0000-4000-8000-000000000001"));
         assert_eq!(
-            crate::ide_context::extract_prompt_request_with_offset(text).0,
+            crate::user_prompt::extract_prompt_request_with_offset(text).0,
             original
         );
         assert!(matches!(&input[1], UserInput::Mention { path, .. } if path == &binding.path));

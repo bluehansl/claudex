@@ -1,5 +1,7 @@
-//! 확인한 Claudex 패키지 전체를 복제하며 기존 daemon 선택은 명시적 갱신 전까지 보존한다.
+//! Copies complete Claudex packages after confirmation while preserving the
+//! existing daemon selection until an explicit update succeeds.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -51,7 +53,7 @@ pub(super) async fn prepare(daemon: &Daemon, settings: &DaemonSettings) -> Resul
     .map(|_| ())
 }
 
-/// 이 CLI 패키지를 로컬 갱신 출처로 선택하고 실행 중인 daemon만 재시작한다.
+/// Select this CLI's complete package and pin it, restarting only a running daemon.
 /// Returns None when the user cancels without changing the installation.
 pub async fn update_from_cli(
     confirm: impl FnOnce(&InstallRequest) -> Result<bool>,
@@ -95,8 +97,7 @@ pub async fn update_from_cli(
             .ok()
             .map(|info| info.app_server_version),
         managed_codex_path,
-        message: "The installed Claudex npm package is selected as the daemon update source."
-            .to_string(),
+        message: "The Claudex package is selected. Run `claudex app-server daemon update` to sync it again from the registered local package.".to_string(),
     }))
 }
 
@@ -118,7 +119,7 @@ async fn prepare_from_package(
         .settings_file
         .parent()
         .and_then(Path::parent)
-        .context("daemon settings path has no Codex home")?;
+        .context("daemon settings path has no Claudex home")?;
     let previous_root = managed_install::package_root(home);
     let root = home.join("packages/claudex-app-server-daemon");
     anyhow::ensure!(
@@ -142,7 +143,7 @@ async fn prepare_from_package(
     } else {
         anyhow::ensure!(
             previous_root.join("current").symlink_metadata().is_ok(),
-            "no daemon package is selected; run `claudex app-server daemon start` first"
+            "no daemon package is selected; run `codex app-server daemon start` first"
         );
     }
     std::fs::create_dir_all(&root)?;
@@ -153,7 +154,7 @@ async fn prepare_from_package(
     let backend = daemon.running_backend_instance(settings).await?;
     anyhow::ensure!(
         backend.is_some() || crate::client::probe(&daemon.socket_path).await.is_err(),
-        "app server is running but is not managed by claudex app-server daemon"
+        "app server is running but is not managed by codex app-server daemon"
     );
     let selected = managed_install::managed_codex_bin(home);
     let previous_release = previous_root.join("current").canonicalize().ok();
@@ -167,9 +168,8 @@ async fn prepare_from_package(
             "the selected daemon package is incomplete; repair its installation before starting"
         );
     }
-    let source = source.context(
-        "this CLI has no complete local package; install @bluehansl/claudex or run a development build with --no-daemon",
-    )?;
+    let source = source
+        .context("this CLI has no complete local Claudex package; reinstall @bluehansl/claudex")?;
     anyhow::ensure!(
         !root.canonicalize()?.starts_with(source.canonicalize()?),
         "CODEX_HOME must be outside the source CLI package"
@@ -184,11 +184,12 @@ async fn prepare_from_package(
     } else {
         "bin/claudex"
     };
+    let source_entrypoint = metadata["entrypoint"].as_str().unwrap_or_default();
     anyhow::ensure!(
         metadata["layoutVersion"] == 1
             && metadata["variant"] == "claudex"
             && metadata["target"] == target
-            && metadata["entrypoint"] == entrypoint,
+            && source_entrypoint == entrypoint,
         "the CLI package does not match this platform or executable"
     );
     validate_package(source)?;
@@ -253,15 +254,17 @@ async fn prepare_from_package(
     let stage = tempfile::Builder::new()
         .prefix(".staging.")
         .tempdir_in(&releases)?;
-    let digest = package_tree(source, Some(stage.path()))?;
-    validate_package(stage.path())?;
-    let staged_exe = stage.path().join(entrypoint);
+    let mut staged_digests = BTreeMap::new();
+    let digest = package_tree_with_digests(source, Some(stage.path()), &mut staged_digests)?;
+    let staged_exe = Path::new(entrypoint);
     anyhow::ensure!(
-        package_tree(source, /*destination*/ None)? == digest
+        package_tree_with_digests(source, /*destination*/ None, &mut BTreeMap::new())? == digest
             && std::fs::read(stage.path().join("codex-package.json"))? == manifest_bytes
-            && managed_install::executable_identity(&staged_exe).await? == running_identity,
+            && staged_digests.get(staged_exe).map(blake3::Hash::as_bytes)
+                == Some(&running_identity.digest),
         "the CLI package changed while preparing the daemon or differs from the running executable"
     );
+    validate_package(stage.path())?;
     let binary_version =
         managed_install::managed_codex_version(&stage.path().join(entrypoint)).await?;
     anyhow::ensure!(
@@ -277,12 +280,20 @@ async fn prepare_from_package(
     if release.try_exists()? {
         anyhow::ensure!(
             !release.symlink_metadata()?.file_type().is_symlink()
-                && package_tree(&release, /*destination*/ None)? == digest,
+                && package_tree_with_digests(
+                    &release,
+                    /*destination*/ None,
+                    &mut BTreeMap::new(),
+                )? == digest,
             "an existing daemon release has different contents; refusing to overwrite it"
         );
     } else {
+        #[cfg(windows)]
+        windows::publish_release(stage.path(), &release).await?;
+        #[cfg(not(windows))]
         std::fs::rename(stage.path(), &release)?;
     }
+    let release = release.canonicalize()?;
     anyhow::ensure!(
         managed_install::package_root(home) == previous_root
             && (backend.is_some() || crate::client::probe(&daemon.socket_path).await.is_err()),
@@ -333,7 +344,14 @@ async fn prepare_from_package(
             return Err(error);
         }
     }
-    crate::local_source::select(&root, &release)?;
+    if previous_release.as_deref() != Some(release.as_path()) {
+        crate::local_source::select(&root, &release)?;
+        if let Err(error) =
+            crate::release_pruning::record_selection(&root, previous_release.as_deref())
+        {
+            tracing::warn!(%error, "could not record daemon selection for pruning");
+        }
+    }
     if backend.is_some() {
         let selected = Daemon {
             pid_file: daemon.pid_file.with_file_name(crate::DAEMON_PID_FILE_NAME),
@@ -344,21 +362,37 @@ async fn prepare_from_package(
             ..daemon.clone()
         };
         selected.start_managed_backend(settings).await.context(
-            "daemon package selected but could not start; retry with `claudex app-server daemon start`",
+            "daemon package selected but could not start; retry with `codex app-server daemon start`",
         )?;
         selected.wait_until_ready().await?;
+    }
+    if let Err(error) = crate::release_pruning::prune(daemon, &root, settings).await {
+        tracing::debug!(%error, "skipped daemon release pruning");
     }
     Ok(true)
 }
 
 /// Hash the complete tree and optionally copy those same bytes. Relative file
 /// links are materialized; escaping links and directory links are rejected.
-pub(crate) fn package_tree(root: &Path, destination: Option<&Path>) -> Result<String> {
+/// Only reuse digests for a private staging directory; source and release
+/// validation must pass a fresh map.
+fn package_tree_with_digests(
+    root: &Path,
+    destination: Option<&Path>,
+    file_digests: &mut BTreeMap<PathBuf, blake3::Hash>,
+) -> Result<String> {
     let canonical_root = root.canonicalize()?;
     let mut hasher = blake3::Hasher::new();
     let mut paths = vec![root.to_path_buf()];
     while let Some(path) = paths.pop() {
         let relative = path.strip_prefix(root)?;
+        // The Unix installer adds this alias outside the package layout.
+        if cfg!(unix)
+            && relative == Path::new("codex")
+            && std::fs::read_link(&path).ok().as_deref() == Some(Path::new("bin/claudex"))
+        {
+            continue;
+        }
         anyhow::ensure!(
             path.canonicalize()?.starts_with(&canonical_root),
             "package link escapes its root"
@@ -384,22 +418,35 @@ pub(crate) fn package_tree(root: &Path, destination: Option<&Path>) -> Result<St
             paths.extend(entries);
         } else {
             anyhow::ensure!(metadata.is_file(), "package contains an unsupported file");
-            let bytes = std::fs::read(&path)?;
+            let digest = if let Some(digest) = file_digests.get(relative)
+                && destination.is_none()
+            {
+                *digest
+            } else {
+                let bytes = std::fs::read(&path)?;
+                let digest = blake3::hash(&bytes);
+                if let Some(destination) = destination {
+                    let target = destination.join(relative);
+                    std::fs::write(&target, bytes)?;
+                    std::fs::set_permissions(target, metadata.permissions())?;
+                }
+                file_digests.insert(relative.to_path_buf(), digest);
+                digest
+            };
             hasher.update(b"file");
-            hasher.update(blake3::hash(&bytes).as_bytes());
+            hasher.update(digest.as_bytes());
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 hasher.update(&(metadata.permissions().mode() & 0o777).to_le_bytes());
             }
-            if let Some(destination) = destination {
-                let target = destination.join(relative);
-                std::fs::write(&target, bytes)?;
-                std::fs::set_permissions(target, metadata.permissions())?;
-            }
         }
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+pub(crate) fn package_tree(root: &Path, destination: Option<&Path>) -> Result<String> {
+    package_tree_with_digests(root, destination, &mut BTreeMap::new())
 }
 
 fn stable_version(value: &str) -> Option<semver::Version> {
@@ -411,19 +458,22 @@ fn stable_version(value: &str) -> Option<semver::Version> {
 }
 
 pub(crate) fn validate_package(root: &Path) -> Result<()> {
+    let entrypoint = if cfg!(windows) {
+        "bin/claudex.exe"
+    } else {
+        "bin/claudex"
+    };
     crate::local_source::entrypoint(root)?;
+    let code_mode_host = Path::new(entrypoint).with_file_name(if cfg!(windows) {
+        "codex-code-mode-host.exe"
+    } else {
+        "codex-code-mode-host"
+    });
+    let code_mode_host = code_mode_host.to_string_lossy();
     let mut names = vec![
         "codex-package.json",
-        if cfg!(windows) {
-            "bin/claudex.exe"
-        } else {
-            "bin/claudex"
-        },
-        if cfg!(windows) {
-            "bin/codex-code-mode-host.exe"
-        } else {
-            "bin/codex-code-mode-host"
-        },
+        entrypoint,
+        code_mode_host.as_ref(),
         if cfg!(windows) {
             "codex-path/rg.exe"
         } else {

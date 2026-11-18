@@ -38,7 +38,7 @@ use rmcp::model::JsonObject;
 use rmcp::model::ListToolsResult;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ServerCapabilities;
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::model::Tool;
 use rmcp::model::ToolAnnotations;
 use rmcp::service::RequestContext;
@@ -620,6 +620,7 @@ impl Controller {
             thread_id: context.thread_id.to_string(),
             turn_trigger: Some("claude_peer".into()),
             tool_output: Some(Box::new(TurnToolOutput {
+                retain: false,
                 name: "received_message".into(),
                 namespace: Some("cross_session".into()),
                 output: FunctionCallOutputBody::Text(serde_json::to_string(&message)?),
@@ -675,8 +676,8 @@ struct StatusArgs {
 }
 
 impl ServerHandler for PeerHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     async fn list_tools(

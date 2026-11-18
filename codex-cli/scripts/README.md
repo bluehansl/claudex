@@ -93,3 +93,8 @@ gh workflow run claudex-platform-packages.yml \
 일반 릴리스에는 로컬 다운로드가 필요 없습니다. 명시적인 로컬 검증/장애 조사 때만
 `scripts/stage_npm_packages.py`, `codex-cli/scripts/build_npm_package.py` 및
 아티팩트 다운로드를 사용합니다. 수동 게시도 플랫폼이 먼저, 루트가 마지막입니다.
+
+npm 변형은 패키지 크기 제한을 지키기 위해 독립 `codex-exec-server` 실행 파일과
+manifest의 `execServer` 항목을 제외합니다. `claudex exec-server`, code-mode host,
+플랫폼 sandbox helper는 유지하며 canonical release archive는 독립 executor를
+계속 포함합니다.

@@ -9,5 +9,6 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
 
 ›    Sync installed Claudex package
      Use this CLI build
+     Restart background server
 
   enter select · esc back

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
 
 use codex_utils_image::PromptImageMode;
 use codex_utils_image::data_url_from_bytes;
@@ -20,6 +21,7 @@ use crate::permissions::FileSystemSandboxEntry;
 use crate::permissions::FileSystemSandboxKind;
 use crate::permissions::FileSystemSandboxPolicy;
 use crate::permissions::FileSystemSpecialPath;
+use crate::permissions::LegacySandboxPolicyProjection;
 use crate::permissions::NetworkSandboxPolicy;
 use crate::permissions::RawFileSystemSandboxEntry;
 use crate::protocol::SandboxPolicy;
@@ -30,11 +32,16 @@ use schemars::JsonSchema;
 
 use crate::ResponseItemId;
 use crate::mcp::CallToolResult;
+use crate::response_item_id::OptionalWireItemId;
 use codex_utils_path_uri::PathUri;
 
 mod configuration_update;
 mod executed_tool_calls;
+
 mod item_metadata;
+mod mcp_content;
+
+use mcp_content::convert_mcp_content_to_items;
 
 pub use crate::local_media::MAX_PROMPT_AUDIO_INPUT_BYTES;
 pub use crate::local_media::snapshot_local_user_input;
@@ -49,10 +56,12 @@ pub use executed_tool_calls::ToolResultMetadata;
 pub use executed_tool_calls::ToolResultSource;
 pub use executed_tool_calls::ToolResultSources;
 pub use executed_tool_calls::bound_executed_tool_calls_for_message;
-pub use executed_tool_calls::bound_executed_tool_calls_for_prompt;
-pub use executed_tool_calls::bound_executed_tool_calls_for_prompt_prioritizing_recent;
 pub use executed_tool_calls::executed_tool_call_metadata_bytes;
+pub use executed_tool_calls::normalize_executed_tool_call_completeness;
 pub use item_metadata::ContentItemKind;
+pub use item_metadata::ContentItemMetadata;
+pub use item_metadata::ContentItemNamespace;
+pub use item_metadata::ContentItemProvenance;
 
 /// Controls the per-command sandbox override requested by a shell-like tool call.
 #[derive(
@@ -654,6 +663,28 @@ impl PermissionProfile {
         )
     }
 
+    /// Decodes a portable legacy template without probing workspace metadata.
+    pub fn from_legacy_sandbox_policy_template(sandbox_policy: &SandboxPolicy) -> Self {
+        if let SandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            exclude_tmpdir_env_var,
+            exclude_slash_tmp,
+            ..
+        } = sandbox_policy
+        {
+            Self::from_runtime_permissions(
+                &FileSystemSandboxPolicy::workspace_write_template(
+                    writable_roots,
+                    *exclude_tmpdir_env_var,
+                    *exclude_slash_tmp,
+                ),
+                NetworkSandboxPolicy::from(sandbox_policy),
+            )
+        } else {
+            Self::from_legacy_sandbox_policy(sandbox_policy)
+        }
+    }
+
     pub fn from_legacy_sandbox_policy_for_cwd(sandbox_policy: &SandboxPolicy, cwd: &Path) -> Self {
         Self::from_runtime_permissions_with_enforcement(
             SandboxEnforcement::from_legacy_sandbox_policy(sandbox_policy),
@@ -685,6 +716,30 @@ impl PermissionProfile {
         }
     }
 
+    /// Returns the historical `sandbox_policy` diagnostic label without constructing
+    /// a legacy policy. Retains native-path compatibility fallbacks rather than
+    /// evaluating executor authorization.
+    pub fn legacy_sandbox_policy_label(&self, cwd: &Path) -> &'static str {
+        match self {
+            Self::Disabled => "danger-full-access",
+            Self::External { .. } => "external-sandbox",
+            Self::Managed { network, .. } => {
+                let file_system = self.file_system_sandbox_policy();
+                if file_system.has_legacy_full_disk_write_access() {
+                    if network.is_enabled() {
+                        "danger-full-access"
+                    } else {
+                        "external-sandbox"
+                    }
+                } else if file_system.has_legacy_write_intent(cwd) {
+                    "workspace-write"
+                } else {
+                    "read-only"
+                }
+            }
+        }
+    }
+
     pub fn to_legacy_sandbox_policy(&self, cwd: &Path) -> io::Result<SandboxPolicy> {
         match self {
             Self::Managed {
@@ -702,6 +757,23 @@ impl PermissionProfile {
                 },
             }),
         }
+    }
+
+    /// Encodes an unresolved template without collapsing fixed roots into cwd access.
+    pub fn to_legacy_sandbox_policy_template(&self) -> io::Result<SandboxPolicy> {
+        let policy = self
+            .file_system_sandbox_policy()
+            .to_legacy_sandbox_policy_with_projection(
+                self.network_sandbox_policy(),
+                LegacySandboxPolicyProjection::Template,
+            )?;
+        if Self::from_legacy_sandbox_policy_template(&policy) != *self {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "permission profile cannot be represented by a legacy sandbox template",
+            ));
+        }
+        Ok(policy)
     }
 
     pub fn to_runtime_permissions(&self) -> (FileSystemSandboxPolicy, NetworkSandboxPolicy) {
@@ -874,10 +946,11 @@ pub enum ResponseInputItem {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[derive(derive_more::Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentItem {
     InputText {
+        #[debug("{:?} <{} bytes>", &text[..text.floor_char_boundary(/*index*/ 512)], text.len())]
         text: String,
     },
     InputImage {
@@ -888,11 +961,38 @@ pub enum ContentItem {
         detail: Option<ImageDetail>,
     },
     InputAudio {
-        audio_url: String,
+        #[serde(flatten)]
+        audio: AudioReference,
     },
     OutputText {
         text: String,
+        // Preserve provider metadata, including empty arrays, for sampled-output replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        #[ts(type = "unknown[]")]
+        #[debug(skip)]
+        annotations: Option<Vec<serde_json::Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        #[ts(type = "unknown[]")]
+        #[debug(skip)]
+        logprobs: Option<Vec<serde_json::Value>>,
     },
+}
+
+/// Constructs an input-text content item.
+pub fn input_text(text: impl Into<String>) -> ContentItem {
+    ContentItem::InputText { text: text.into() }
+}
+
+impl ContentItem {
+    /// Extracts text, returning `None` for non-text content.
+    pub fn into_text(self) -> Option<String> {
+        match self {
+            Self::InputText { text } | Self::OutputText { text, .. } => Some(text),
+            Self::InputImage { .. } | Self::InputAudio { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
@@ -900,6 +1000,15 @@ pub enum ContentItem {
 #[ts(untagged)]
 pub enum ImageReference {
     Inline { image_url: String },
+    File { file_id: String },
+}
+
+/// Inline audio data or an uploaded file loaded by the Responses API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(untagged)]
+pub enum AudioReference {
+    Inline { audio_url: String },
     File { file_id: String },
 }
 
@@ -937,7 +1046,7 @@ pub const DEFAULT_IMAGE_DETAIL: ImageDetail = ImageDetail::High;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
-/// Classifies an assistant message as interim commentary or final answer text.
+/// Classifies assistant text as commentary, a partial answer, or a terminal answer.
 ///
 /// Providers do not emit this consistently, so callers must treat `None` as
 /// "phase unknown" and keep compatibility behavior for legacy models.
@@ -947,7 +1056,9 @@ pub enum MessagePhase {
     /// Additional tool calls or assistant output may follow before turn
     /// completion.
     Commentary,
-    /// The assistant's terminal answer text for the current turn.
+    /// Stable answer text that may be followed by more assistant output or tools.
+    PartialAnswer,
+    /// The assistant's declared terminal answer text for the current turn.
     FinalAnswer,
 }
 
@@ -966,12 +1077,25 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub create_time: Option<serde_json::Number>,
+    /// Native content-token count for this sampled message, including its sampled footer.
+    /// Read from the producer only; do not replay telemetry into subsequent model requests.
+    #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub content_token_count: Option<u64>,
     /// Harness-owned classifications aligned with the item's content entries.
     #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     #[ts(skip)]
     pub content_item_kinds: Option<Vec<ContentItemKind>>,
+    /// Positional source attribution for `content`; missing historical entries are Unknown.
+    #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub content_item_metadata: Option<Vec<ContentItemMetadata>>,
     // Ignore input values so requests and rollout reloads cannot fake tool call records.
     // A resumed thread can record new calls, but cannot prove old calls from this payload.
     /// Host-owned Code Mode cell shared by its `exec` and subsequent `wait` outputs.
@@ -984,7 +1108,8 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub executed_tool_calls: Option<Vec<ExecutedToolCall>>,
-    /// Whether the host recorded the complete call inventory without losing calls or arguments.
+    /// Whether the host recorded the complete ordered call inventory without losing calls or names.
+    /// Recorded arguments may be truncated independently of this claim.
     /// For a direct tool output this covers its single invocation; with `cell_id`, it covers
     /// the Code Mode cell across its outputs. Neither case describes tool success.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
@@ -1010,17 +1135,26 @@ impl InternalChatMessageMetadataPassthrough {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseItem {
-    #[schemars(skip)]
-    #[ts(skip)]
     AdditionalTools {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         role: String,
-        tools: Vec<serde_json::Value>,
+        #[ts(type = "unknown[]")]
+        // Share immutable declarations across history and request copies.
+        tools: Arc<[serde_json::Value]>,
     },
     Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         role: String,
         content: Vec<ContentItem>,
@@ -1036,7 +1170,8 @@ pub enum ResponseItem {
     },
     AgentMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         author: String,
         recipient: String,
@@ -1047,7 +1182,8 @@ pub enum ResponseItem {
     },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         summary: Vec<ReasoningItemReasoningSummary>,
         #[serde(default, skip_serializing_if = "should_serialize_reasoning_content")]
@@ -1059,9 +1195,13 @@ pub enum ResponseItem {
         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     },
     LocalShellCall {
-        /// Legacy id field retained for compatibility with older payloads.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        /// Legacy id field retained for compatibility with older payloads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         /// Set when using the Responses API.
         call_id: Option<String>,
@@ -1074,6 +1214,13 @@ pub enum ResponseItem {
     FunctionCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1094,6 +1241,10 @@ pub enum ResponseItem {
     ToolSearchCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1113,7 +1264,8 @@ pub enum ResponseItem {
     // We keep this behavior centralized in `FunctionCallOutputPayload`.
     FunctionCallOutput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -1134,6 +1286,10 @@ pub enum ResponseItem {
     CustomToolCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -1154,7 +1310,8 @@ pub enum ResponseItem {
     // text or structured content items.
     CustomToolCallOutput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1169,7 +1326,8 @@ pub enum ResponseItem {
     },
     ToolSearchOutput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         call_id: Option<String>,
         status: String,
@@ -1191,6 +1349,10 @@ pub enum ResponseItem {
     WebSearchCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -1214,6 +1376,10 @@ pub enum ResponseItem {
     ImageGenerationCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1227,7 +1393,8 @@ pub enum ResponseItem {
     #[serde(alias = "compaction_summary")]
     Compaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         encrypted_content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1242,7 +1409,8 @@ pub enum ResponseItem {
     CompactionTrigger {},
     ContextCompaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[serde(with = "OptionalWireItemId")]
+        #[ts(optional, as = "Option<ResponseItemId>")]
         id: Option<ResponseItemId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -1256,6 +1424,99 @@ pub enum ResponseItem {
 }
 
 impl ResponseItem {
+    /// File-backed audio in messages and tool results, in request order.
+    pub fn file_audio_ids(&self) -> impl Iterator<Item = &String> + Clone {
+        let (message, tool): (&[ContentItem], &[FunctionCallOutputContentItem]) = match self {
+            Self::Message { content, .. } => (content, &[]),
+            Self::FunctionCallOutput { output, .. } | Self::CustomToolCallOutput { output, .. } => {
+                (&[], output.content_items().unwrap_or_default())
+            }
+            _ => (&[], &[]),
+        };
+        message
+            .iter()
+            .filter_map(|part| match part {
+                ContentItem::InputAudio {
+                    audio: AudioReference::File { file_id },
+                } => Some(file_id),
+                _ => None,
+            })
+            .chain(tool.iter().filter_map(|part| match part {
+                FunctionCallOutputContentItem::InputAudio {
+                    audio: AudioReference::File { file_id },
+                } => Some(file_id),
+                _ => None,
+            }))
+    }
+
+    /// Clears the top-level `encrypted_content` fields.
+    pub fn clear_encrypted_content(&mut self) {
+        match self {
+            Self::Message {
+                encrypted_content, ..
+            }
+            | Self::Reasoning {
+                encrypted_content, ..
+            }
+            | Self::LocalShellCall {
+                encrypted_content, ..
+            }
+            | Self::FunctionCall {
+                encrypted_content, ..
+            }
+            | Self::ToolSearchCall {
+                encrypted_content, ..
+            }
+            | Self::CustomToolCall {
+                encrypted_content, ..
+            }
+            | Self::WebSearchCall {
+                encrypted_content, ..
+            }
+            | Self::ImageGenerationCall {
+                encrypted_content, ..
+            }
+            | Self::ContextCompaction {
+                encrypted_content, ..
+            } => *encrypted_content = None,
+            Self::Compaction {
+                encrypted_content, ..
+            } => encrypted_content.clear(),
+            Self::AdditionalTools { .. }
+            | Self::AgentMessage { .. }
+            | Self::FunctionCallOutput { .. }
+            | Self::CustomToolCallOutput { .. }
+            | Self::ToolSearchOutput { .. }
+            | Self::ConfigurationUpdate { .. }
+            | Self::CompactionTrigger { .. }
+            | Self::Other => {}
+        }
+    }
+
+    /// Returns the wire type name for this response item.
+    pub fn item_type(&self) -> &'static str {
+        match self {
+            Self::AdditionalTools { .. } => "additional_tools",
+            Self::Message { .. } => "message",
+            Self::AgentMessage { .. } => "agent_message",
+            Self::Reasoning { .. } => "reasoning",
+            Self::LocalShellCall { .. } => "local_shell_call",
+            Self::FunctionCall { .. } => "function_call",
+            Self::ToolSearchCall { .. } => "tool_search_call",
+            Self::FunctionCallOutput { .. } => "function_call_output",
+            Self::CustomToolCall { .. } => "custom_tool_call",
+            Self::CustomToolCallOutput { .. } => "custom_tool_call_output",
+            Self::ToolSearchOutput { .. } => "tool_search_output",
+            Self::WebSearchCall { .. } => "web_search_call",
+            Self::ImageGenerationCall { .. } => "image_generation_call",
+            Self::Compaction { .. } => "compaction",
+            Self::ConfigurationUpdate { .. } => "configuration_update",
+            Self::CompactionTrigger { .. } => "compaction_trigger",
+            Self::ContextCompaction { .. } => "context_compaction",
+            Self::Other => "other",
+        }
+    }
+
     /// Returns whether this item is an ordinary user-role message.
     pub fn is_user_message(&self) -> bool {
         matches!(self, Self::Message { role, .. } if role == "user")
@@ -1382,7 +1643,7 @@ impl ResponseItem {
         }
     }
 
-    /// Removes content item classifications while preserving other passthrough metadata.
+    /// Removes content item classifications and attribution, preserving other metadata.
     pub fn clear_content_item_kinds(&mut self) {
         let Some(metadata) = self.internal_chat_message_metadata_passthrough_mut() else {
             return;
@@ -1392,8 +1653,21 @@ impl ResponseItem {
         };
 
         metadata_value.content_item_kinds = None;
+        metadata_value.content_item_metadata = None;
         if metadata_value == &InternalChatMessageMetadataPassthrough::default() {
             *metadata = None;
+        }
+    }
+
+    /// Removes per-content attribution for endpoints that do not yet accept it.
+    pub fn clear_content_item_metadata(&mut self) {
+        if let Some(metadata) = self.internal_chat_message_metadata_passthrough_mut()
+            && let Some(value) = metadata
+        {
+            value.content_item_metadata = None;
+            if value == &InternalChatMessageMetadataPassthrough::default() {
+                *metadata = None;
+            }
         }
     }
 
@@ -1740,6 +2014,28 @@ pub fn is_audio_close_tag_text(text: &str) -> bool {
     text == AUDIO_CLOSE_TAG
 }
 
+/// Whether this text opens a harness label for the adjacent media part.
+pub fn is_opening_media_label(text: &str, media: &ContentItem) -> bool {
+    match media {
+        ContentItem::InputImage { .. } => {
+            is_local_image_open_tag_text(text) || is_image_open_tag_text(text)
+        }
+        ContentItem::InputAudio { .. } => {
+            is_local_audio_open_tag_text(text) || is_audio_open_tag_text(text)
+        }
+        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+    }
+}
+
+/// Whether this text closes a harness label for the adjacent media part.
+pub fn is_closing_media_label(text: &str, media: &ContentItem) -> bool {
+    match media {
+        ContentItem::InputImage { .. } => is_image_close_tag_text(text),
+        ContentItem::InputAudio { .. } => is_audio_close_tag_text(text),
+        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+    }
+}
+
 fn invalid_image_error_placeholder(
     path: &std::path::Path,
     error: impl std::fmt::Display,
@@ -1833,7 +2129,9 @@ fn local_audio_content_items(
             text: local_audio_open_tag_text_with_path(label_number, path),
         },
         ContentItem::InputAudio {
-            audio_url: data_url_from_bytes(mime, file_bytes),
+            audio: AudioReference::Inline {
+                audio_url: data_url_from_bytes(mime, file_bytes),
+            },
         },
         ContentItem::InputText {
             text: LOCAL_AUDIO_CLOSE_TAG.to_string(),
@@ -1873,6 +2171,8 @@ impl From<ResponseInputItem> for ResponseItem {
                 content,
                 phase,
             } => Self::Message {
+                status: None,
+                encrypted_content: None,
                 role,
                 content,
                 id: None,
@@ -2048,9 +2348,9 @@ impl ResponseInputItem {
                         )],
                     }
                 }
-                UserInput::Audio { audio_url } => {
+                UserInput::Audio { audio } => {
                     audio_index += 1;
-                    vec![ContentItem::InputAudio { audio_url }]
+                    vec![ContentItem::InputAudio { audio }]
                 }
                 UserInput::LocalAudio { path } => {
                     audio_index += 1;
@@ -2110,11 +2410,35 @@ pub enum FunctionCallOutputContentItem {
     },
     // Do not rename, these are serialized and used directly in the responses API.
     InputAudio {
-        audio_url: String,
+        #[serde(flatten)]
+        audio: AudioReference,
     },
     EncryptedContent {
         encrypted_content: String,
     },
+}
+
+impl FunctionCallOutputContentItem {
+    /// Audio supplied by an MCP server or Code Mode, before host attachment preparation.
+    pub fn inline_audio(audio_url: String) -> Self {
+        Self::InputAudio {
+            audio: AudioReference::Inline { audio_url },
+        }
+    }
+}
+
+/// Converts message content to tool output, preserving media and image detail.
+/// Output text becomes input text without its sampling annotations or logprobs.
+impl From<ContentItem> for FunctionCallOutputContentItem {
+    fn from(item: ContentItem) -> Self {
+        match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                Self::InputText { text }
+            }
+            ContentItem::InputImage { image, detail } => Self::InputImage { image, detail },
+            ContentItem::InputAudio { audio } => Self::InputAudio { audio },
+        }
+    }
 }
 
 /// Converts structured function-call output content into plain text for
@@ -2166,7 +2490,7 @@ impl From<crate::dynamic_tools::DynamicToolCallOutputContentItem>
                 }
             }
             crate::dynamic_tools::DynamicToolCallOutputContentItem::InputAudio { audio_url } => {
-                Self::InputAudio { audio_url }
+                Self::inline_audio(audio_url)
             }
         }
     }
@@ -2341,108 +2665,6 @@ impl CallToolResult {
     }
 }
 
-fn convert_mcp_content_to_items(
-    contents: &[serde_json::Value],
-) -> Vec<FunctionCallOutputContentItem> {
-    const CODEX_ENCRYPTED_CONTENT_META_KEY: &str = "codex/encryptedContent";
-    const CODEX_IMAGE_DETAIL_META_KEY: &str = "codex/imageDetail";
-
-    #[derive(serde::Deserialize)]
-    #[serde(tag = "type")]
-    enum McpContent {
-        #[serde(rename = "text")]
-        Text {
-            text: String,
-            #[serde(rename = "_meta", default)]
-            meta: Option<serde_json::Value>,
-        },
-        #[serde(rename = "image")]
-        Image {
-            data: String,
-            #[serde(rename = "mimeType", alias = "mime_type")]
-            mime_type: Option<String>,
-            #[serde(rename = "_meta", default)]
-            meta: Option<serde_json::Value>,
-        },
-        #[serde(rename = "audio")]
-        Audio {
-            data: String,
-            #[serde(rename = "mimeType", alias = "mime_type")]
-            mime_type: Option<String>,
-            #[serde(rename = "_meta", default)]
-            _meta: Option<serde_json::Value>,
-        },
-        #[serde(other)]
-        Unknown,
-    }
-
-    let mut items = Vec::with_capacity(contents.len());
-
-    for content in contents {
-        let item = match serde_json::from_value::<McpContent>(content.clone()) {
-            Ok(McpContent::Text { text, meta }) => {
-                if meta
-                    .as_ref()
-                    .and_then(|meta| meta.get(CODEX_ENCRYPTED_CONTENT_META_KEY))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    FunctionCallOutputContentItem::EncryptedContent {
-                        encrypted_content: text,
-                    }
-                } else {
-                    FunctionCallOutputContentItem::InputText { text }
-                }
-            }
-            Ok(McpContent::Image {
-                data,
-                mime_type,
-                meta,
-            }) => {
-                let image_url = if data.starts_with("data:") {
-                    data
-                } else {
-                    let mime_type = mime_type.unwrap_or_else(|| "application/octet-stream".into());
-                    format!("data:{mime_type};base64,{data}")
-                };
-                FunctionCallOutputContentItem::InputImage {
-                    image: ImageReference::Inline { image_url },
-                    detail: meta
-                        .as_ref()
-                        .and_then(serde_json::Value::as_object)
-                        .and_then(|meta| meta.get(CODEX_IMAGE_DETAIL_META_KEY))
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|detail| match detail {
-                            "auto" => Some(ImageDetail::Auto),
-                            "low" => Some(ImageDetail::Low),
-                            "high" => Some(ImageDetail::High),
-                            "original" => Some(ImageDetail::Original),
-                            _ => None,
-                        })
-                        .or(Some(DEFAULT_IMAGE_DETAIL)),
-                }
-            }
-            Ok(McpContent::Audio {
-                data, mime_type, ..
-            }) => {
-                let audio_url = if data.starts_with("data:") {
-                    data
-                } else {
-                    let mime_type = mime_type.unwrap_or_else(|| "application/octet-stream".into());
-                    format!("data:{mime_type};base64,{data}")
-                };
-                FunctionCallOutputContentItem::InputAudio { audio_url }
-            }
-            Ok(McpContent::Unknown) | Err(_) => FunctionCallOutputContentItem::InputText {
-                text: serde_json::to_string(content).unwrap_or_else(|_| "<content>".to_string()),
-            },
-        };
-        items.push(item);
-    }
-
-    items
-}
-
 // Implement Display so callers can treat the payload like a plain string when logging or doing
 // trivial substring checks in tests (existing tests call `.contains()` on the output). For
 // `ContentItems`, Display emits a JSON representation.
@@ -2518,27 +2740,44 @@ mod tests {
     }
 
     #[test]
-    fn response_input_message_conversion_preserves_phase() {
-        let item = ResponseItem::from(ResponseInputItem::Message {
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: "still working".to_string(),
-            }],
-            phase: Some(MessagePhase::Commentary),
-        });
-
-        assert_eq!(
-            item,
-            ResponseItem::Message {
+    fn response_input_message_conversion_preserves_phase() -> Result<()> {
+        for phase in [
+            None,
+            Some(MessagePhase::Commentary),
+            Some(MessagePhase::PartialAnswer),
+            Some(MessagePhase::FinalAnswer),
+        ] {
+            let input = ResponseInputItem::Message {
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
+                    text: "answer text".to_string(),
+                }],
+                phase: phase.clone(),
+            };
+            let wire = serde_json::to_value(input)?;
+            let item = ResponseItem::from(serde_json::from_value::<ResponseInputItem>(wire)?);
+            let expected = ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
-                    text: "still working".to_string(),
+                    annotations: None,
+                    logprobs: None,
+                    text: "answer text".to_string(),
                 }],
-                phase: Some(MessagePhase::Commentary),
+                phase,
                 internal_chat_message_metadata_passthrough: None,
-            }
-        );
+            };
+            assert_eq!(item, expected);
+            assert_eq!(
+                serde_json::from_value::<ResponseItem>(serde_json::to_value(item)?)?,
+                expected
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -2627,7 +2866,7 @@ mod tests {
         let mut additional_tools = ResponseItem::AdditionalTools {
             id: None,
             role: "developer".to_string(),
-            tools: Vec::new(),
+            tools: Arc::from([]),
         };
         additional_tools.set_id(Some(ResponseItemId::with_suffix("at", "test")));
         assert_eq!(
@@ -2640,6 +2879,8 @@ mod tests {
         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     ) -> ResponseItem {
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -2758,6 +2999,7 @@ mod tests {
         assert_eq!(
             item,
             ResponseItem::ImageGenerationCall {
+                encrypted_content: None,
                 id: Some(ResponseItemId::with_suffix("ig", "123")),
                 status: "completed".to_string(),
                 revised_prompt: Some("A small blue square".to_string()),
@@ -2780,6 +3022,7 @@ mod tests {
         assert_eq!(
             item,
             ResponseItem::ImageGenerationCall {
+                encrypted_content: None,
                 id: Some(ResponseItemId::with_suffix("ig", "123")),
                 status: "completed".to_string(),
                 revised_prompt: None,
@@ -3079,6 +3322,17 @@ mod tests {
     }
 
     #[test]
+    fn tool_audio_references_round_trip_in_the_responses_wire_shape() {
+        for wire in [
+            serde_json::json!({"type":"input_audio","audio_url":"data:audio/wav;base64,QQ=="}),
+            serde_json::json!({"type":"input_audio","file_id":"file-clip"}),
+        ] {
+            let part: FunctionCallOutputContentItem = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(part).unwrap(), wire);
+        }
+    }
+
+    #[test]
     fn convert_mcp_audio_content_builds_data_urls_and_preserves_existing_data_urls() {
         let contents = vec![
             serde_json::json!({
@@ -3097,12 +3351,12 @@ mod tests {
         assert_eq!(
             convert_mcp_content_to_items(&contents),
             vec![
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/wav;base64,Zm9v".to_string(),
-                },
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/ogg;base64,YmFy".to_string(),
-                },
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/wav;base64,Zm9v".to_string()
+                ),
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/ogg;base64,YmFy".to_string()
+                ),
             ]
         );
     }
@@ -3155,9 +3409,7 @@ mod tests {
                 },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
-            FunctionCallOutputContentItem::InputAudio {
-                audio_url: "data:audio/wav;base64,AAA".to_string(),
-            },
+            FunctionCallOutputContentItem::inline_audio("data:audio/wav;base64,AAA".to_string()),
             FunctionCallOutputContentItem::EncryptedContent {
                 encrypted_content: "enc_opaque".to_string(),
             },
@@ -3206,6 +3458,8 @@ mod tests {
         assert_eq!(
             item,
             ResponseItem::FunctionCall {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 name: "mcp__codex_apps__gmail_get_recent_emails".to_string(),
                 namespace: Some("mcp__codex_apps__gmail".to_string()),
@@ -3500,9 +3754,9 @@ mod tests {
                     FunctionCallOutputContentItem::InputText {
                         text: "caption".into(),
                     },
-                    FunctionCallOutputContentItem::InputAudio {
-                        audio_url: "data:audio/wav;base64,BASE64".into(),
-                    },
+                    FunctionCallOutputContentItem::inline_audio(
+                        "data:audio/wav;base64,BASE64".into()
+                    ),
                 ]),
                 success: Some(true),
             }
@@ -3583,12 +3837,20 @@ mod tests {
 
     #[test]
     fn preserves_existing_image_data_urls() -> Result<()> {
+        let urls = [
+            "data:image/png;base64,BASE64",
+            "DaTa:image/png;base64,BASE64",
+        ];
         let call_tool_result = CallToolResult {
-            content: vec![serde_json::json!({
-                "type": "image",
-                "data": "data:image/png;base64,BASE64",
-                "mimeType": "image/png"
-            })],
+            content: urls
+                .map(|url| {
+                    serde_json::json!({
+                        "type": "image",
+                        "data": url,
+                        "mimeType": "image/png"
+                    })
+                })
+                .into(),
             structured_content: None,
             is_error: Some(false),
             meta: None,
@@ -3598,15 +3860,14 @@ mod tests {
         let Some(items) = payload.content_items() else {
             panic!("expected content items");
         };
-        let items = items.to_vec();
         assert_eq!(
             items,
-            vec![FunctionCallOutputContentItem::InputImage {
+            &urls.map(|url| FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::Inline {
-                    image_url: "data:image/png;base64,BASE64".into(),
+                    image_url: url.into(),
                 },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
-            }]
+            })
         );
 
         Ok(())
@@ -3879,6 +4140,7 @@ mod tests {
         for (json_literal, expected_id, expected_action, expected_status) in cases {
             let parsed: ResponseItem = serde_json::from_str(json_literal)?;
             let expected = ResponseItem::WebSearchCall {
+                encrypted_content: None,
                 id: expected_id.clone(),
                 status: expected_status.clone(),
                 action: expected_action.clone(),
@@ -3958,34 +4220,47 @@ mod tests {
 
     #[test]
     fn serializes_audio_user_input_without_tags() -> Result<()> {
-        let audio_url = "data:audio/wav;base64,abc".to_string();
-
-        let item = ResponseInputItem::from(vec![UserInput::Audio {
-            audio_url: audio_url.clone(),
-        }]);
-
-        assert_eq!(
-            item,
-            ResponseInputItem::Message {
-                role: "user".to_string(),
-                content: vec![ContentItem::InputAudio { audio_url }],
-                phase: None,
-            }
-        );
-        assert_eq!(
-            serde_json::to_value(item)?,
-            serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "audio_url": "data:audio/wav;base64,abc",
-                    },
-                ],
-            })
-        );
-
+        for (audio, wire) in [
+            (
+                AudioReference::Inline {
+                    audio_url: "data:audio/wav;base64,abc".into(),
+                },
+                serde_json::json!({"type": "input_audio", "audio_url": "data:audio/wav;base64,abc"}),
+            ),
+            (
+                AudioReference::File {
+                    file_id: "file_audio".into(),
+                },
+                serde_json::json!({"type": "input_audio", "file_id": "file_audio"}),
+            ),
+        ] {
+            let input = UserInput::Audio {
+                audio: audio.clone(),
+            };
+            assert_eq!(
+                serde_json::from_value::<UserInput>(serde_json::to_value(&input)?)?,
+                input
+            );
+            let item = ResponseInputItem::from(vec![input]);
+            assert_eq!(
+                item,
+                ResponseInputItem::Message {
+                    role: "user".into(),
+                    content: vec![ContentItem::InputAudio { audio }],
+                    phase: None,
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&item)?,
+                serde_json::json!({
+                    "type": "message", "role": "user", "content": [wire],
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<ResponseInputItem>(serde_json::to_value(&item)?)?,
+                item
+            );
+        }
         Ok(())
     }
 
@@ -4018,7 +4293,9 @@ mod tests {
                             ),
                         },
                         ContentItem::InputAudio {
-                            audio_url: format!("data:{mime};base64,YXVkaW8="),
+                            audio: AudioReference::Inline {
+                                audio_url: format!("data:{mime};base64,YXVkaW8=")
+                            },
                         },
                         ContentItem::InputText {
                             text: audio_close_tag_text(),
@@ -4121,6 +4398,7 @@ mod tests {
         assert_eq!(
             parsed,
             ResponseItem::ToolSearchCall {
+                encrypted_content: None,
                 id: None,
                 call_id: Some("search-1".to_string()),
                 status: None,
@@ -4238,6 +4516,7 @@ mod tests {
         assert_eq!(
             parsed_call,
             ResponseItem::ToolSearchCall {
+                encrypted_content: None,
                 id: None,
                 call_id: None,
                 status: Some("completed".to_string()),
@@ -4392,7 +4671,9 @@ mod tests {
 
         let item = ResponseInputItem::from(vec![
             UserInput::Audio {
-                audio_url: audio_url.clone(),
+                audio: AudioReference::Inline {
+                    audio_url: audio_url.clone(),
+                },
             },
             UserInput::LocalAudio {
                 path: local_path.clone(),
@@ -4404,7 +4685,9 @@ mod tests {
             ResponseInputItem::Message {
                 role: "user".to_string(),
                 content: vec![
-                    ContentItem::InputAudio { audio_url },
+                    ContentItem::InputAudio {
+                        audio: AudioReference::Inline { audio_url }
+                    },
                     ContentItem::InputText {
                         text: local_audio_open_tag_text_with_path(
                             /*label_number*/ 2,
@@ -4412,7 +4695,9 @@ mod tests {
                         ),
                     },
                     ContentItem::InputAudio {
-                        audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+                        audio: AudioReference::Inline {
+                            audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string()
+                        }
                     },
                     ContentItem::InputText {
                         text: audio_close_tag_text(),

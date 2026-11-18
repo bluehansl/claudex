@@ -15,8 +15,6 @@ use std::path::Path;
 use std::process::Stdio as TokioStdio;
 #[cfg(windows)]
 use winapi::um::winbase::CREATE_NO_WINDOW;
-#[cfg(windows)]
-use winapi::um::winbase::CREATE_SUSPENDED;
 
 use crate::child::Child;
 use crate::child::ChildKind;
@@ -69,6 +67,8 @@ pub enum ChildStdin {
     Null,
     #[cfg(unix)]
     File(std::os::fd::OwnedFd),
+    #[cfg(windows)]
+    File(std::os::windows::io::OwnedHandle),
 }
 
 /// A local command whose complete launch contract is known to both backends.
@@ -188,6 +188,20 @@ impl Command {
         self
     }
 
+    /// Supply the child endpoint of a Windows output pipe.
+    #[cfg(windows)]
+    pub fn stdout_handle(&mut self, handle: std::os::windows::io::OwnedHandle) -> &mut Self {
+        self.inner.stdout(TokioStdio::from(handle));
+        self
+    }
+
+    /// Supply the child endpoint of a Windows diagnostic pipe.
+    #[cfg(windows)]
+    pub fn stderr_handle(&mut self, handle: std::os::windows::io::OwnedHandle) -> &mut Self {
+        self.inner.stderr(TokioStdio::from(handle));
+        self
+    }
+
     pub fn descriptor_policy(&mut self, policy: DescriptorPolicy) -> &mut Self {
         self.descriptor_policy = policy;
         self
@@ -240,19 +254,10 @@ impl Command {
         self
     }
 
-    /// Set the Windows process creation flags, replacing any previously selected flags.
-    #[cfg(windows)]
-    pub fn creation_flags(&mut self, flags: u32) -> &mut Self {
-        self.inner.creation_flags(flags);
-        self
-    }
     /// Preserve Job Object assignment before the child begins executing on Windows.
     #[cfg(windows)]
     pub fn prepare_suspended_spawn(&mut self, job: &crate::JobObject) {
         job.prepare_suspended_spawn(&mut self.inner);
-        // Tokio's creation_flags replaces, rather than adds to, the flags.
-        self.inner
-            .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     }
 
     /// Reject original inputs that std replaced with a NUL-free placeholder.
@@ -300,6 +305,8 @@ impl Command {
             ChildStdin::Null => TokioStdio::null(),
             #[cfg(unix)]
             ChildStdin::File(fd) => TokioStdio::from(fd),
+            #[cfg(windows)]
+            ChildStdin::File(handle) => TokioStdio::from(handle),
         });
         #[cfg(unix)]
         {

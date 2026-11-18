@@ -16,7 +16,8 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { inspect, promisify } from "node:util";
 
-const DEFAULT_MANUAL_URL = "https://developers.openai.com/codex/codex-manual.md";
+const DEFAULT_MANUAL_URL =
+  "https://developers.openai.com/codex/codex-manual.md";
 const DEFAULT_CACHE_DIR_NAME = "openai-docs-cache";
 const CACHE_FILE_NAME = "codex-manual.md";
 const OUTLINE_FILE_NAME = "codex-manual.outline.md";
@@ -79,7 +80,7 @@ const parseCurlHeaders = (rawHeaders) => {
   const statusMatch = /^HTTP\/\S+\s+(\d{3})/.exec(statusLine);
   if (!statusMatch) {
     throw new ManualFetchError(
-      `Could not parse HTTP status from curl response: ${statusLine}`
+      `Could not parse HTTP status from curl response: ${statusLine}`,
     );
   }
 
@@ -103,7 +104,7 @@ const tempFilePath = (cacheDir, suffix) =>
     cacheDir,
     `.fetch-codex-manual-${process.pid}-${Date.now()}-${Math.random()
       .toString(16)
-      .slice(2)}${suffix}`
+      .slice(2)}${suffix}`,
   );
 
 const requestManualWithCurl = async (url, { cacheDir, method, timeoutMs }) => {
@@ -166,19 +167,24 @@ const requestManualWithCurl = async (url, { cacheDir, method, timeoutMs }) => {
 const requestManualWithFetch = async (url, { method, timeoutMs }) => {
   if (typeof fetch !== "function") {
     throw new ManualFetchError(
-      "Native fetch is unavailable in this Node runtime."
+      "Native fetch is unavailable in this Node runtime.",
     );
   }
 
-  return withTimeout(
-    (signal) =>
-      fetch(url, {
-        method,
-        headers: { "User-Agent": USER_AGENT },
-        signal,
-      }),
-    timeoutMs
-  );
+  return withTimeout(async (signal) => {
+    const response = await fetch(url, {
+      method,
+      headers: { "User-Agent": USER_AGENT },
+      signal,
+    });
+    if (!response.ok || method === "HEAD") return response;
+    // Keep body reads inside both the timeout and transport fallback.
+    return makeResponse({
+      body: await response.text(),
+      headers: response.headers,
+      status: response.status,
+    });
+  }, timeoutMs);
 };
 
 const requestManual = async (url, { cacheDir, method, timeoutMs }) => {
@@ -199,7 +205,7 @@ const requestManual = async (url, { cacheDir, method, timeoutMs }) => {
       const response = await transport();
       if (!response.ok) {
         throw new ManualFetchError(
-          `${method} ${url} failed with HTTP ${response.status}.`
+          `${method} ${url} failed with HTTP ${response.status}.`,
         );
       }
       return response;
@@ -241,13 +247,6 @@ const nearestExistingParent = async (target) => {
 const usableCacheDir = async (cacheDir) => {
   if (!cacheDir) return null;
   const resolved = path.resolve(cacheDir);
-
-  try {
-    const info = await stat(resolved);
-    if (!info.isDirectory()) return null;
-  } catch (error) {
-    if (error?.code !== "ENOENT") return null;
-  }
 
   const parent = await nearestExistingParent(resolved);
   if (!parent) return null;
@@ -308,7 +307,10 @@ const manualLines = (manual) => {
 };
 
 const sectionTitle = (rawTitle) =>
-  rawTitle.replace(/\s+#+\s*$/, "").replace(/\s+/g, " ").trim();
+  rawTitle
+    .replace(/\s+#+\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const buildOutline = (manual) => {
   const lines = manualLines(manual);
@@ -367,7 +369,8 @@ const buildOutline = (manual) => {
   };
 };
 
-const outlineMarkdown = (outline) => `# Codex Manual Outline\n\n${outline.text}\n`;
+const outlineMarkdown = (outline) =>
+  `# Codex Manual Outline\n\n${outline.text}\n`;
 
 const manualStatusLine = (status) =>
   status.cacheStatus === "hit"
@@ -414,7 +417,7 @@ const fetchCodexManual = async ({
   const resolvedCacheDir = await resolveCacheDir(cacheDir);
   if (!resolvedCacheDir) {
     throw new ManualFetchError(
-      "Manual cache directory is unavailable; pass --cache-dir to override or use OpenAI Docs MCP fallback."
+      "Manual cache directory is unavailable; pass --cache-dir to override or use OpenAI Docs MCP fallback.",
     );
   }
   await mkdir(resolvedCacheDir, { recursive: true });

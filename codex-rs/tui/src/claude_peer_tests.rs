@@ -643,7 +643,7 @@ async fn resume_transport_does_not_overwrite_the_owning_frontends_configuration(
     let attachment = observer.reserve_attachment(thread).await;
     assert!(!attachment.owns);
     let transport = ThreadToolTransport::WithPeer(
-        Box::new(ThreadToolTransport::Disabled),
+        Box::new(ThreadToolTransport::Dynamic),
         Arc::clone(&observer),
     );
     let mut config = Some(std::collections::HashMap::from([
